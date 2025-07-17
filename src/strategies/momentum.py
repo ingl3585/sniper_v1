@@ -9,20 +9,17 @@ import logging
 from src.strategies.base_strategy import BaseStrategy, Signal
 from src.infra.nt_bridge import MarketData
 from src.config import MomentumConfig
+from src.infra.nt_bridge import TradeSignal
 
 
 class MomentumStrategy(BaseStrategy):
     """Momentum strategy based on EMA crossovers and trend strength."""
     
-    def __init__(self, config: MomentumConfig):
+    def __init__(self, config: MomentumConfig, price_history_manager=None):
         
-        super().__init__("Momentum", config)
+        super().__init__("Momentum", config, price_history_manager)
         self.config: MomentumConfig = config
         self.logger = logging.getLogger(__name__)
-        self.price_30m_history = []
-        self.volume_30m_history = []
-        self.price_1h_history = []
-        self.volume_1h_history = []
         self.trend_direction = 0  # 1=up, -1=down, 0=neutral
         self.trend_strength = 0.0
         self.trend_duration = 0
@@ -33,23 +30,23 @@ class MomentumStrategy(BaseStrategy):
             return None
         
         # Update price and volume history
-        self._update_histories(market_data)
+        self.update_price_history(market_data)
         
         # Need sufficient history for EMA calculation
-        if len(self.price_1h_history) < self.config.slow_ema_period:
+        if not self.price_history_manager.has_sufficient_data('1h', self.config.slow_ema_period):
             return None
         
         # Analyze trend on 1h timeframe
-        signal_1h = self._analyze_trend(
-            self.price_1h_history, self.volume_1h_history, "1h"
-        )
+        prices_1h = self.price_history_manager.get_prices('1h')
+        volumes_1h = self.price_history_manager.get_volumes('1h')
+        signal_1h = self._analyze_trend(prices_1h, volumes_1h, "1h")
         
         # Analyze trend on 30m timeframe for confirmation
         signal_30m = None
-        if len(self.price_30m_history) >= self.config.slow_ema_period:
-            signal_30m = self._analyze_trend(
-                self.price_30m_history, self.volume_30m_history, "30m"
-            )
+        if self.price_history_manager.has_sufficient_data('30m', self.config.slow_ema_period):
+            prices_30m = self.price_history_manager.get_prices('30m')
+            volumes_30m = self.price_history_manager.get_volumes('30m')
+            signal_30m = self._analyze_trend(prices_30m, volumes_30m, "30m")
         
         # Combine signals from both timeframes
         final_signal = self._combine_momentum_signals(signal_1h, signal_30m, market_data)
@@ -59,33 +56,23 @@ class MomentumStrategy(BaseStrategy):
         
         return final_signal
     
-    def _update_histories(self, market_data: MarketData):
-        """Update price and volume histories."""
-        # Update 1h data
-        if market_data.price_1h:
-            self.price_1h_history = market_data.price_1h[-150:]  # Keep last 150 bars
-        if market_data.volume_1h:
-            self.volume_1h_history = market_data.volume_1h[-150:]
-        
-        # Simulate 30m data from 1h (for demo - in real implementation use actual 30m data)
-        if len(self.price_1h_history) >= 2:
-            self.price_30m_history = self._interpolate_30m(self.price_1h_history)
-            self.volume_30m_history = self._interpolate_30m(self.volume_1h_history)
     
-    def _interpolate_30m(self, hourly_data: list) -> list:
-        """Interpolate 30m data from hourly data (simplified for demo)."""
-        if len(hourly_data) < 2:
-            return hourly_data
+    def create_trade_signal(self, signal: Signal, market_data: MarketData) -> 'TradeSignal':
+        """Convert strategy signal to trade signal for execution."""
         
-        interpolated = []
-        for i in range(len(hourly_data) - 1):
-            interpolated.append(hourly_data[i])
-            # Add midpoint between consecutive hours
-            midpoint = (hourly_data[i] + hourly_data[i + 1]) / 2
-            interpolated.append(midpoint)
+        # Calculate position size if not specified
+        if signal.size == 1 and signal.stop_price:
+            signal.size = self.calculate_position_size(market_data, signal.stop_price)
         
-        interpolated.append(hourly_data[-1])
-        return interpolated[-100:]  # Keep last 100 bars
+        return TradeSignal(
+            action=signal.action,
+            position_size=signal.size,
+            confidence=signal.confidence,
+            use_stop=signal.stop_price is not None,
+            stop_price=signal.stop_price or 0.0,
+            use_target=signal.target_price is not None,
+            target_price=signal.target_price or 0.0
+        )
     
     def _analyze_trend(self, prices: list, volumes: list, timeframe: str) -> Optional[Signal]:
         """Analyze trend strength and direction for momentum signals."""
@@ -121,7 +108,7 @@ class MomentumStrategy(BaseStrategy):
         
         # Calculate ATR for stop loss
         atr_period = min(self.config.atr_lookback, len(prices))
-        atr = self._calculate_atr_simple(prices[-atr_period:])
+        atr = self.calculate_atr_simple(prices[-atr_period:])
         
         # Log all calculated values
         self.logger.info(f"{timeframe} Momentum Analysis:")
@@ -250,13 +237,6 @@ class MomentumStrategy(BaseStrategy):
         
         self.trend_strength = trend_strength
     
-    def _calculate_atr_simple(self, prices: list) -> float:
-        """Calculate simple ATR approximation using price ranges."""
-        if len(prices) < 2:
-            return prices[0] * 0.02  # 2% default for momentum
-        
-        ranges = [abs(prices[i] - prices[i-1]) for i in range(1, len(prices))]
-        return np.mean(ranges[-10:])  # 10-period average
     
     def _combine_momentum_signals(self, signal_1h: Optional[Signal], signal_30m: Optional[Signal], 
                                 market_data: MarketData) -> Optional[Signal]:
@@ -294,13 +274,13 @@ class MomentumStrategy(BaseStrategy):
             'trend_direction': self.trend_direction,
             'trend_strength': self.trend_strength,
             'trend_duration': self.trend_duration,
-            'price_1h_history_length': len(self.price_1h_history),
+            'price_1h_history_length': self.price_history_manager.get_data_length('1h'),
             'current_fast_ema': self.calculate_ema(
-                self.price_1h_history, self.config.fast_ema_period
-            ) if len(self.price_1h_history) >= self.config.fast_ema_period else 0,
+                self.price_history_manager.get_prices('1h'), self.config.fast_ema_period
+            ) if self.price_history_manager.has_sufficient_data('1h', self.config.fast_ema_period) else 0,
             'current_slow_ema': self.calculate_ema(
-                self.price_1h_history, self.config.slow_ema_period
-            ) if len(self.price_1h_history) >= self.config.slow_ema_period else 0
+                self.price_history_manager.get_prices('1h'), self.config.slow_ema_period
+            ) if self.price_history_manager.has_sufficient_data('1h', self.config.slow_ema_period) else 0
         })
         
         return base_metrics

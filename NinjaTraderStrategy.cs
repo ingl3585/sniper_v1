@@ -7,6 +7,7 @@ using System.Net.Sockets;
 using System.Text;
 using System.Web.Script.Serialization;
 using System.Threading;
+using System.Linq;
 using NinjaTrader.Cbi;
 using NinjaTrader.Data;
 using NinjaTrader.NinjaScript;
@@ -24,8 +25,8 @@ namespace NinjaTrader.NinjaScript.Strategies
         private bool isRunning;
         private bool historicalSent;
 
-        private List<double> price1m = new(), price5m = new(), price15m = new(), price1h = new();
-        private List<double> vol1m = new(), vol5m = new(), vol15m = new(), vol1h = new();
+        private List<double> price1m = new(), price5m = new(), price15m = new(), price30m = new(), price1h = new();
+        private List<double> vol1m = new(), vol5m = new(), vol15m = new(), vol30m = new(), vol1h = new();
 		private JavaScriptSerializer serializer = new JavaScriptSerializer();
 
         private int entryId = 0;
@@ -60,6 +61,7 @@ namespace NinjaTrader.NinjaScript.Strategies
                     AddDataSeries(BarsPeriodType.Minute, 15);
                     AddDataSeries(BarsPeriodType.Minute, 5);
                     AddDataSeries(BarsPeriodType.Minute, 1);
+                    AddDataSeries(BarsPeriodType.Minute, 30);
                     AddDataSeries(BarsPeriodType.Minute, 60);
                     break;
 
@@ -119,10 +121,22 @@ namespace NinjaTrader.NinjaScript.Strategies
                 UpdateList(vol5m, Volumes[2][0], 500);
             }
 
+            if (BarsArray.Length > 3 && BarsArray[3].Count > 0)
+            {
+                UpdateList(price1m, Closes[3][0], 1000);
+                UpdateList(vol1m, Volumes[3][0], 1000);
+            }
+
             if (BarsArray.Length > 4 && BarsArray[4].Count > 0)
             {
-                UpdateList(price1h, Closes[4][0], 100);
-                UpdateList(vol1h, Volumes[4][0], 100);
+                UpdateList(price30m, Closes[4][0], 150);
+                UpdateList(vol30m, Volumes[4][0], 150);
+            }
+
+            if (BarsArray.Length > 5 && BarsArray[5].Count > 0)
+            {
+                UpdateList(price1h, Closes[5][0], 100);
+                UpdateList(vol1h, Volumes[5][0], 100);
             }
         }
 
@@ -164,7 +178,7 @@ namespace NinjaTrader.NinjaScript.Strategies
 
         private void SendHistorical()
         {
-            if (historicalSent || BarsArray.Length < 4) return;
+            if (historicalSent || BarsArray.Length < 6) return;
 
             int days = 10;
             var payload = new
@@ -173,7 +187,8 @@ namespace NinjaTrader.NinjaScript.Strategies
                 bars_1m = ExtractBars(BarsArray[3], days * 1440),
                 bars_5m = ExtractBars(BarsArray[2], days * 288),
                 bars_15m = ExtractBars(BarsArray[1], days * 96),
-                bars_1h = ExtractBars(BarsArray[4], days * 24),
+                bars_30m = ExtractBars(BarsArray[4], days * 48),
+                bars_1h = ExtractBars(BarsArray[5], days * 24),
                 timestamp = DateTime.UtcNow.Ticks
             };
 
@@ -208,10 +223,12 @@ namespace NinjaTrader.NinjaScript.Strategies
                 price_1m = price1m,
                 price_5m = price5m,
                 price_15m = price15m,
+                price_30m = price30m,
                 price_1h = price1h,
                 volume_1m = vol1m,
                 volume_5m = vol5m,
                 volume_15m = vol15m,
+                volume_30m = vol30m,
                 volume_1h = vol1h,
                 current_price = Close[0],
                 open_positions = Position.Quantity,
@@ -240,10 +257,25 @@ namespace NinjaTrader.NinjaScript.Strategies
         private double CalculateVolatility()
         {
             if (price1m.Count < 20) return 0.02;
-            double sum = 0;
+            
+            // Calculate rolling standard deviation of returns (more accurate volatility measure)
+            var returns = new List<double>();
             for (int i = 1; i < price1m.Count; i++)
-                sum += Math.Abs(price1m[i] - price1m[i - 1]) / price1m[i - 1];
-            return sum / (price1m.Count - 1);
+            {
+                if (price1m[i - 1] > 0)
+                    returns.Add(Math.Log(price1m[i] / price1m[i - 1]));
+            }
+            
+            if (returns.Count < 2) return 0.02;
+            
+            // Calculate standard deviation of returns
+            double mean = returns.Average();
+            double sumSquaredDeviations = returns.Sum(x => Math.Pow(x - mean, 2));
+            double variance = sumSquaredDeviations / (returns.Count - 1);
+            double stdDev = Math.Sqrt(variance);
+            
+            // Annualized volatility (assuming 1440 minutes per day)
+            return stdDev * Math.Sqrt(1440);
         }
 
         private void StartSignalThread()

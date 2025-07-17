@@ -11,6 +11,7 @@ from typing import Dict, Any, Optional, Callable
 from dataclasses import dataclass
 from datetime import datetime
 import logging
+from queue import Queue, Empty
 
 
 @dataclass
@@ -19,10 +20,12 @@ class MarketData:
     price_1m: list[float]
     price_5m: list[float]
     price_15m: list[float]
+    price_30m: list[float]
     price_1h: list[float]
     volume_1m: list[float]
     volume_5m: list[float]
     volume_15m: list[float]
+    volume_30m: list[float]
     volume_1h: list[float]
     account_balance: float
     buying_power: float
@@ -78,6 +81,19 @@ class NinjaTradeBridge:
         
         # Threading
         self.data_thread: Optional[threading.Thread] = None
+        self.signal_thread: Optional[threading.Thread] = None
+        
+        # Thread safety
+        self._data_lock = threading.RLock()
+        self._signal_lock = threading.RLock()
+        
+        # Error recovery
+        self.max_reconnect_attempts = 10
+        self.reconnect_delay = 5.0
+        self.connection_timeout = 30.0
+        
+        # Signal queue for thread-safe signal sending
+        self.signal_queue = Queue()
         
         # Logging
         logging.basicConfig(level=logging.INFO)
@@ -143,51 +159,93 @@ class NinjaTradeBridge:
         server_socket.close()
     
     def _listen_data(self):
-        """Listen for data from NinjaScript."""
-        server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        server_socket.bind(('localhost', self.data_port))
-        server_socket.listen(1)
+        """Listen for data from NinjaScript with reconnection logic."""
+        reconnect_attempts = 0
         
-        self.logger.info(f"Listening for data on port {self.data_port}")
-        
-        while self.is_running:
+        while self.is_running and reconnect_attempts < self.max_reconnect_attempts:
             try:
-                client_socket, addr = server_socket.accept()
-                self.logger.info(f"NinjaScript connected from {addr}")
-                self.data_socket = client_socket
+                server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                server_socket.settimeout(self.connection_timeout)
+                server_socket.bind(('localhost', self.data_port))
+                server_socket.listen(1)
+                
+                self.logger.info(f"Listening for data on port {self.data_port}")
+                reconnect_attempts = 0  # Reset on successful bind
                 
                 while self.is_running:
                     try:
-                        # Read message length header (4 bytes)
-                        header_data = self._recv_all(client_socket, 4)
-                        if not header_data:
-                            break
+                        client_socket, addr = server_socket.accept()
+                        self.logger.info(f"NinjaScript connected from {addr}")
                         
-                        message_length = struct.unpack('<I', header_data)[0]
+                        with self._data_lock:
+                            self.data_socket = client_socket
                         
-                        # Read message data
-                        message_data = self._recv_all(client_socket, message_length)
-                        if not message_data:
-                            break
+                        # Handle client connection
+                        self._handle_data_connection(client_socket)
                         
-                        # Parse JSON message
-                        message = json.loads(message_data.decode('utf-8'))
-                        self._handle_message(message)
-                        
+                    except socket.timeout:
+                        continue  # Keep listening for connections
                     except Exception as e:
-                        self.logger.error(f"Error receiving data: {e}")
+                        if self.is_running:
+                            self.logger.error(f"Error accepting data connection: {e}")
+                            time.sleep(1)
                         break
                 
-                client_socket.close()
-                self.data_socket = None
+                server_socket.close()
                 
             except Exception as e:
                 if self.is_running:
-                    self.logger.error(f"Data listener error: {e}")
-                    time.sleep(1)
-        
-        server_socket.close()
+                    reconnect_attempts += 1
+                    self.logger.error(f"Data listener error (attempt {reconnect_attempts}): {e}")
+                    if reconnect_attempts < self.max_reconnect_attempts:
+                        self.logger.info(f"Retrying in {self.reconnect_delay} seconds...")
+                        time.sleep(self.reconnect_delay)
+                    else:
+                        self.logger.error("Max reconnection attempts reached for data listener")
+                        break
+    
+    def _handle_data_connection(self, client_socket: socket.socket):
+        """Handle individual data connection."""
+        try:
+            while self.is_running:
+                try:
+                    # Read message length header (4 bytes)
+                    header_data = self._recv_all(client_socket, 4)
+                    if not header_data:
+                        break
+                    
+                    message_length = struct.unpack('<I', header_data)[0]
+                    
+                    # Validate message length
+                    if message_length > 10 * 1024 * 1024:  # 10MB limit
+                        self.logger.error(f"Message too large: {message_length} bytes")
+                        break
+                    
+                    # Read message data
+                    message_data = self._recv_all(client_socket, message_length)
+                    if not message_data:
+                        break
+                    
+                    # Parse JSON message
+                    try:
+                        message = json.loads(message_data.decode('utf-8'))
+                        self._handle_message(message)
+                    except json.JSONDecodeError as e:
+                        self.logger.error(f"Invalid JSON received: {e}")
+                        continue
+                        
+                except socket.timeout:
+                    continue
+                except Exception as e:
+                    self.logger.error(f"Error receiving data: {e}")
+                    break
+                    
+        finally:
+            client_socket.close()
+            with self._data_lock:
+                self.data_socket = None
+            self.logger.info("Data connection closed")
     
     def _recv_all(self, sock: socket.socket, length: int) -> bytes:
         """Receive exactly length bytes from socket."""
@@ -229,10 +287,12 @@ class NinjaTradeBridge:
             price_1m=message.get('price_1m', []),
             price_5m=message.get('price_5m', []),
             price_15m=message.get('price_15m', []),
+            price_30m=message.get('price_30m', []),
             price_1h=message.get('price_1h', []),
             volume_1m=message.get('volume_1m', []),
             volume_5m=message.get('volume_5m', []),
             volume_15m=message.get('volume_15m', []),
+            volume_30m=message.get('volume_30m', []),
             volume_1h=message.get('volume_1h', []),
             account_balance=message.get('account_balance', 0.0),
             buying_power=message.get('buying_power', 0.0),
@@ -258,37 +318,77 @@ class NinjaTradeBridge:
         )
     
     def send_signal(self, signal: TradeSignal) -> bool:
-        """Send trade signal to NinjaScript."""
-        if not self.signal_socket:
-            self.logger.error("Signal socket not connected - NinjaScript must connect first")
-            return False
-        
+        """Send trade signal to NinjaScript (thread-safe)."""
         try:
-            # Create signal message
-            message = {
-                'action': signal.action,
-                'position_size': signal.position_size,
-                'confidence': signal.confidence,
-                'use_stop': signal.use_stop,
-                'stop_price': signal.stop_price,
-                'use_target': signal.use_target,
-                'target_price': signal.target_price
-            }
-            
-            # Serialize to JSON
-            json_data = json.dumps(message).encode('utf-8')
-            
-            # Send length header + data
-            header = struct.pack('<I', len(json_data))
-            self.signal_socket.send(header + json_data)
-            
-            action_str = "BUY" if signal.action == 1 else "SELL" if signal.action == 2 else "CLOSE_ALL"
-            self.logger.info(f"Signal sent: {action_str} {signal.position_size} @ {signal.confidence:.2f}")
+            # Add signal to queue for processing by signal thread
+            self.signal_queue.put(signal, timeout=1.0)
             return True
-            
         except Exception as e:
-            self.logger.error(f"Failed to send signal: {e}")
+            self.logger.error(f"Failed to queue signal: {e}")
             return False
+    
+    def _process_signal_queue(self):
+        """Process queued signals (runs in signal thread)."""
+        while self.is_running:
+            try:
+                # Get signal from queue with timeout
+                signal = self.signal_queue.get(timeout=1.0)
+                
+                # Send the signal
+                success = self._send_signal_direct(signal)
+                
+                if not success:
+                    # Requeue signal for retry (with limit)
+                    if not hasattr(signal, '_retry_count'):
+                        signal._retry_count = 0
+                    
+                    signal._retry_count += 1
+                    if signal._retry_count < 3:
+                        self.logger.warning(f"Retrying signal send (attempt {signal._retry_count})")
+                        self.signal_queue.put(signal)
+                    else:
+                        self.logger.error("Max signal retry attempts reached, dropping signal")
+                
+                self.signal_queue.task_done()
+                
+            except Empty:
+                continue  # Timeout waiting for signal
+            except Exception as e:
+                self.logger.error(f"Error processing signal queue: {e}")
+    
+    def _send_signal_direct(self, signal: TradeSignal) -> bool:
+        """Send signal directly to NinjaScript."""
+        with self._signal_lock:
+            if not self.signal_socket:
+                self.logger.error("Signal socket not connected")
+                return False
+            
+            try:
+                # Create signal message
+                message = {
+                    'action': signal.action,
+                    'position_size': signal.position_size,
+                    'confidence': signal.confidence,
+                    'use_stop': signal.use_stop,
+                    'stop_price': signal.stop_price,
+                    'use_target': signal.use_target,
+                    'target_price': signal.target_price
+                }
+                
+                # Serialize to JSON
+                json_data = json.dumps(message).encode('utf-8')
+                
+                # Send length header + data
+                header = struct.pack('<I', len(json_data))
+                self.signal_socket.send(header + json_data)
+                
+                action_str = "BUY" if signal.action == 1 else "SELL" if signal.action == 2 else "CLOSE_ALL"
+                self.logger.info(f"Signal sent: {action_str} {signal.position_size} @ {signal.confidence:.2f}")
+                return True
+                
+            except Exception as e:
+                self.logger.error(f"Failed to send signal: {e}")
+                return False
     
     def get_latest_data(self) -> Optional[MarketData]:
         """Get the most recent market data."""

@@ -17,6 +17,7 @@ from src.strategies.momentum import MomentumStrategy
 from src.models.meta_allocator import MetaAllocator, AllocationDecision
 from src.models.ppo_execution import PPOExecutionAgent, ExecutionDecision
 from src.utils.data_manager import DataManager
+from src.utils.price_history_manager import PriceHistoryManager
 from src.config import SystemConfig
 
 
@@ -41,10 +42,11 @@ class TradingSystem:
         # Initialize components
         self.bridge = NinjaTradeBridge(config.trading.data_port, config.trading.signal_port)
         self.data_manager = DataManager(config.trading.data_dir)
+        self.price_history_manager = PriceHistoryManager()
         
-        # Initialize strategies
-        self.mean_reversion = MeanReversionStrategy(config.mean_reversion)
-        self.momentum = MomentumStrategy(config.momentum)
+        # Initialize strategies with shared price history manager
+        self.mean_reversion = MeanReversionStrategy(config.mean_reversion, self.price_history_manager)
+        self.momentum = MomentumStrategy(config.momentum, self.price_history_manager)
         
         # Initialize ML components
         self.meta_allocator = MetaAllocator(config.meta_allocator.model_path, config.meta_allocator) if config.trading.enable_ml_allocator else None
@@ -309,11 +311,24 @@ class TradingSystem:
         """Execute trading signal."""
         try:
             # Convert strategy signal to trade signal
-            if hasattr(signal, 'action'):
-                # It's already a strategy signal
-                trade_signal = self.mean_reversion.create_trade_signal(signal, market_data)
+            if hasattr(signal, 'confidence') and hasattr(signal, 'action'):
+                # It's a strategy Signal object - convert to TradeSignal
+                if hasattr(signal, 'stop_price'):
+                    # Determine which strategy created this signal to use correct create_trade_signal method
+                    trade_signal = self.mean_reversion.create_trade_signal(signal, market_data)
+                else:
+                    # Fallback method if signal doesn't have stop_price
+                    trade_signal = TradeSignal(
+                        action=signal.action,
+                        position_size=signal.size,
+                        confidence=signal.confidence,
+                        use_stop=signal.stop_price is not None,
+                        stop_price=signal.stop_price or 0.0,
+                        use_target=signal.target_price is not None,
+                        target_price=signal.target_price or 0.0
+                    )
             else:
-                # It's a raw signal
+                # It's already a TradeSignal
                 trade_signal = signal
             
             # Get execution decision from RL agent

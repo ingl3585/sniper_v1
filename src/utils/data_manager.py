@@ -33,17 +33,19 @@ class DataManager:
     
     def _initialize_tables(self):
         """Initialize database tables."""
-        # Market data table
+        # Market data table with 30m fields
         self.conn.execute("""
             CREATE TABLE IF NOT EXISTS market_data (
                 timestamp TIMESTAMP,
                 price_1m DOUBLE[],
                 price_5m DOUBLE[],
                 price_15m DOUBLE[],
+                price_30m DOUBLE[],
                 price_1h DOUBLE[],
                 volume_1m DOUBLE[],
                 volume_5m DOUBLE[],
                 volume_15m DOUBLE[],
+                volume_30m DOUBLE[],
                 volume_1h DOUBLE[],
                 account_balance DOUBLE,
                 buying_power DOUBLE,
@@ -104,17 +106,19 @@ class DataManager:
             
             self.conn.execute("""
                 INSERT INTO market_data VALUES (
-                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
                 )
             """, (
                 timestamp,
                 market_data.price_1m,
                 market_data.price_5m,
                 market_data.price_15m,
+                market_data.price_30m,
                 market_data.price_1h,
                 market_data.volume_1m,
                 market_data.volume_5m,
                 market_data.volume_15m,
+                market_data.volume_30m,
                 market_data.volume_1h,
                 market_data.account_balance,
                 market_data.buying_power,
@@ -125,8 +129,7 @@ class DataManager:
                 market_data.volatility
             ))
             
-            # Also save to parquet for backup
-            self._save_to_parquet(market_data, "market_data")
+            # Note: Using DuckDB as primary storage, parquet only for archival
             
         except Exception as e:
             self.logger.error(f"Error storing market data: {e}")
@@ -154,8 +157,7 @@ class DataManager:
                 trade_completion.trade_duration_minutes
             ))
             
-            # Also save to parquet
-            self._save_to_parquet(trade_completion, "trade_completions")
+            # Note: Using DuckDB as primary storage
             
         except Exception as e:
             self.logger.error(f"Error storing trade completion: {e}")
@@ -163,7 +165,7 @@ class DataManager:
     def store_historical_data(self, historical_data: Dict[str, Any]):
         """Store historical data from NinjaTrader."""
         try:
-            timeframes = ['1m', '5m', '15m', '1h']
+            timeframes = ['1m', '5m', '15m', '30m', '1h']
             
             for timeframe in timeframes:
                 bars_key = f'bars_{timeframe}'
@@ -203,8 +205,8 @@ class DataManager:
                             datetime.now()
                         ))
             
-            # Save to parquet files by timeframe
-            self._save_historical_to_parquet(historical_data)
+            # Only save to parquet for long-term archival if needed
+            # self._save_historical_to_parquet(historical_data)
             
             self.logger.info(f"Historical data stored for {len(timeframes)} timeframes")
             
@@ -228,10 +230,7 @@ class DataManager:
                 datetime.now()
             ))
             
-            # Also save to JSON file
-            state_file = self.data_dir / f"system_state_{timestamp.strftime('%Y%m%d_%H%M%S')}.json"
-            with open(state_file, 'w') as f:
-                json.dump(state, f, indent=2)
+            # DuckDB is primary storage, no need for redundant JSON files
             
         except Exception as e:
             self.logger.error(f"Error saving system state: {e}")
@@ -335,17 +334,19 @@ class DataManager:
             timestamp = datetime.now().strftime('%Y%m%d_%H')
             filename = parquet_dir / f"{table_name}_{timestamp}.parquet"
             
-            # Convert data to DataFrame
+            # Convert data to DataFrame (with 30m fields)
             if isinstance(data, MarketData):
                 df = pd.DataFrame([{
                     'timestamp': datetime.fromtimestamp(data.timestamp),
                     'price_1m': str(data.price_1m),
                     'price_5m': str(data.price_5m),
                     'price_15m': str(data.price_15m),
+                    'price_30m': str(data.price_30m),
                     'price_1h': str(data.price_1h),
                     'volume_1m': str(data.volume_1m),
                     'volume_5m': str(data.volume_5m),
                     'volume_15m': str(data.volume_15m),
+                    'volume_30m': str(data.volume_30m),
                     'volume_1h': str(data.volume_1h),
                     'account_balance': data.account_balance,
                     'buying_power': data.buying_power,
@@ -383,7 +384,7 @@ class DataManager:
     def _save_historical_to_parquet(self, historical_data: Dict[str, Any]):
         """Save historical data to parquet files."""
         try:
-            timeframes = ['1m', '5m', '15m', '1h']
+            timeframes = ['1m', '5m', '15m', '30m', '1h']
             
             for timeframe in timeframes:
                 bars_key = f'bars_{timeframe}'

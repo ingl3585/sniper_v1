@@ -14,16 +14,12 @@ from src.config import MeanReversionConfig
 class MeanReversionStrategy(BaseStrategy):
     """Mean reversion strategy based on VWAP deviation."""
     
-    def __init__(self, config: MeanReversionConfig):
+    def __init__(self, config: MeanReversionConfig, price_history_manager=None):
         
-        super().__init__("MeanReversion", config)
+        super().__init__("MeanReversion", config, price_history_manager)
         self.config: MeanReversionConfig = config
         self.logger = logging.getLogger(__name__)
         self.vwap_history = []
-        self.price_5m_history = []
-        self.volume_5m_history = []
-        self.price_15m_history = []
-        self.volume_15m_history = []
     
     def generate_signal(self, market_data: MarketData) -> Optional[Signal]:
         """Generate mean reversion signal based on VWAP deviation."""
@@ -31,26 +27,24 @@ class MeanReversionStrategy(BaseStrategy):
             return None
         
         # Update price and volume history
-        self._update_histories(market_data)
+        self.update_price_history(market_data)
         
-        self.logger.debug(f"Mean Reversion: 5m history={len(self.price_5m_history)}, 15m history={len(self.price_15m_history)}")
-        
-        # Need sufficient history for analysis
-        if len(self.price_5m_history) < self.config.vwap_period:
-            self.logger.debug(f"Mean Reversion: Insufficient 5m data - need {self.config.vwap_period}, have {len(self.price_5m_history)}")
+        # Check if we have sufficient data for analysis
+        if not self.price_history_manager.has_sufficient_data('5m', self.config.vwap_period):
+            self.logger.debug(f"Mean Reversion: Insufficient 5m data - need {self.config.vwap_period}")
             return None
         
         # Calculate VWAP and deviation for 5m timeframe
-        signal_5m = self._analyze_timeframe(
-            self.price_5m_history, self.volume_5m_history, "5m"
-        )
+        prices_5m = self.price_history_manager.get_prices('5m')
+        volumes_5m = self.price_history_manager.get_volumes('5m')
+        signal_5m = self._analyze_timeframe(prices_5m, volumes_5m, "5m")
         
         # Calculate VWAP and deviation for 15m timeframe
         signal_15m = None
-        if len(self.price_15m_history) >= self.config.vwap_period:
-            signal_15m = self._analyze_timeframe(
-                self.price_15m_history, self.volume_15m_history, "15m"
-            )
+        if self.price_history_manager.has_sufficient_data('15m', self.config.vwap_period):
+            prices_15m = self.price_history_manager.get_prices('15m')
+            volumes_15m = self.price_history_manager.get_volumes('15m')
+            signal_15m = self._analyze_timeframe(prices_15m, volumes_15m, "15m")
         
         # Combine signals from both timeframes
         final_signal = self._combine_signals(signal_5m, signal_15m, market_data)
@@ -60,19 +54,6 @@ class MeanReversionStrategy(BaseStrategy):
         
         return final_signal
     
-    def _update_histories(self, market_data: MarketData):
-        """Update price and volume histories."""
-        # Update 5m data
-        if market_data.price_5m:
-            self.price_5m_history = market_data.price_5m[-50:]  # Keep last 50 bars
-        if market_data.volume_5m:
-            self.volume_5m_history = market_data.volume_5m[-50:]
-        
-        # Update 15m data
-        if market_data.price_15m:
-            self.price_15m_history = market_data.price_15m[-50:]
-        if market_data.volume_15m:
-            self.volume_15m_history = market_data.volume_15m[-50:]
     
     def _analyze_timeframe(self, prices: list, volumes: list, timeframe: str) -> Optional[Signal]:
         """Analyze a specific timeframe for mean reversion opportunities."""
@@ -114,7 +95,7 @@ class MeanReversionStrategy(BaseStrategy):
         
         # Calculate ATR for stop loss
         atr_period = min(self.config.atr_lookback, len(prices))
-        atr = self._calculate_atr_simple(prices[-atr_period:])
+        atr = self.calculate_atr_simple(prices[-atr_period:])
         
         # Log all calculated values
         self.logger.info(f"{timeframe} Mean Reversion Analysis:")
@@ -167,13 +148,6 @@ class MeanReversionStrategy(BaseStrategy):
         
         return signal
     
-    def _calculate_atr_simple(self, prices: list) -> float:
-        """Calculate simple ATR approximation using price ranges."""
-        if len(prices) < 2:
-            return prices[0] * 0.01  # 1% default
-        
-        ranges = [abs(prices[i] - prices[i-1]) for i in range(1, len(prices))]
-        return np.mean(ranges[-10:])  # 10-period average
     
     def _combine_signals(self, signal_5m: Optional[Signal], signal_15m: Optional[Signal], 
                         market_data: MarketData) -> Optional[Signal]:
@@ -208,12 +182,12 @@ class MeanReversionStrategy(BaseStrategy):
         base_metrics.update({
             'vwap_period': self.config.vwap_period,
             'deviation_threshold': self.config.deviation_threshold,
-            'price_5m_history_length': len(self.price_5m_history),
-            'price_15m_history_length': len(self.price_15m_history),
+            'price_5m_history_length': self.price_history_manager.get_data_length('5m'),
+            'price_15m_history_length': self.price_history_manager.get_data_length('15m'),
             'current_vwap_5m': self.calculate_vwap(
-                self.price_5m_history[-self.config.vwap_period:],
-                self.volume_5m_history[-self.config.vwap_period:]
-            ) if len(self.price_5m_history) >= self.config.vwap_period else 0
+                self.price_history_manager.get_prices('5m', self.config.vwap_period),
+                self.price_history_manager.get_volumes('5m', self.config.vwap_period)
+            ) if self.price_history_manager.has_sufficient_data('5m', self.config.vwap_period) else 0
         })
         
         return base_metrics

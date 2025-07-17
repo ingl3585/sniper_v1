@@ -9,6 +9,7 @@ from datetime import datetime
 import numpy as np
 import pandas as pd
 from src.infra.nt_bridge import MarketData, TradeSignal
+from src.utils.price_history_manager import PriceHistoryManager
 
 
 # StrategyConfig removed - using centralized config from src.config
@@ -30,13 +31,13 @@ class Signal:
 class BaseStrategy(ABC):
     """Abstract base class for all trading strategies."""
     
-    def __init__(self, name: str, config):
+    def __init__(self, name: str, config, price_history_manager: PriceHistoryManager = None):
         self.name = name
         self.config = config
         self.position_size = 0
         self.last_signal_time = None
         self.atr_values = []
-        self.price_history = []
+        self.price_history_manager = price_history_manager or PriceHistoryManager()
         
     @abstractmethod
     def generate_signal(self, market_data: MarketData) -> Optional[Signal]:
@@ -44,16 +45,8 @@ class BaseStrategy(ABC):
         pass
     
     def update_price_history(self, market_data: MarketData):
-        """Update price history for technical indicators."""
-        if not market_data.price_1m:
-            return
-            
-        current_price = market_data.price_1m[-1]
-        self.price_history.append(current_price)
-        
-        # Keep only last 200 prices for efficiency
-        if len(self.price_history) > 200:
-            self.price_history = self.price_history[-200:]
+        """Update price history using centralized manager."""
+        self.price_history_manager.update_from_market_data(market_data)
     
     def calculate_atr(self, high_prices: List[float], low_prices: List[float], 
                      close_prices: List[float], period: int = 10) -> float:
@@ -138,6 +131,32 @@ class BaseStrategy(ABC):
         
         return rsi
     
+    def calculate_volatility(self, prices: List[float], period: int = 20) -> float:
+        """Calculate rolling volatility using standard deviation of returns."""
+        if len(prices) < period + 1:
+            return 0.02  # Default volatility
+        
+        # Calculate log returns
+        returns = []
+        for i in range(1, len(prices)):
+            if prices[i-1] > 0:
+                returns.append(np.log(prices[i] / prices[i-1]))
+        
+        if len(returns) < period:
+            return np.std(returns) if returns else 0.02
+        
+        # Use the last 'period' returns
+        recent_returns = returns[-period:]
+        return np.std(recent_returns) * np.sqrt(1440)  # Annualized (1440 minutes per day)
+    
+    def calculate_atr_simple(self, prices: List[float], period: int = 10) -> float:
+        """Calculate simple ATR approximation using price ranges."""
+        if len(prices) < 2:
+            return prices[0] * 0.01 if prices else 0.01  # 1% default
+        
+        ranges = [abs(prices[i] - prices[i-1]) for i in range(1, len(prices))]
+        return np.mean(ranges[-period:]) if len(ranges) >= period else np.mean(ranges)
+    
     def calculate_position_size(self, market_data: MarketData, 
                               stop_price: float) -> int:
         """Calculate position size based on risk management."""
@@ -204,5 +223,5 @@ class BaseStrategy(ABC):
             'name': self.name,
             'position_size': self.position_size,
             'last_signal': self.last_signal_time,
-            'price_history_length': len(self.price_history)
+            'price_history_status': self.price_history_manager.get_status()
         }

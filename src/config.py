@@ -51,18 +51,16 @@ class TradingConfig:
 
 
 @dataclass
-class BaseStrategyConfig:
-    """Base configuration for all trading strategies."""
+class MeanReversionConfig:
+    """Mean reversion strategy configuration."""
+    # Risk Management
     max_position_size: int = 10
     risk_per_trade: float = 0.02
     atr_lookback: int = 10
     stop_loss_atr_multiplier: float = 2.0
     min_confidence: float = 0.6
-
-
-@dataclass
-class MeanReversionConfig(BaseStrategyConfig):
-    """Mean reversion strategy configuration."""
+    
+    # Strategy Parameters
     vwap_period: int = 20
     deviation_threshold: float = 2.0
     min_volume_threshold: float = 1000
@@ -72,8 +70,16 @@ class MeanReversionConfig(BaseStrategyConfig):
 
 
 @dataclass
-class MomentumConfig(BaseStrategyConfig):
+class MomentumConfig:
     """Momentum strategy configuration."""
+    # Risk Management
+    max_position_size: int = 10
+    risk_per_trade: float = 0.02
+    atr_lookback: int = 10
+    stop_loss_atr_multiplier: float = 2.0
+    min_confidence: float = 0.6
+    
+    # Strategy Parameters
     fast_ema_period: int = 20
     slow_ema_period: int = 100
     trend_strength_threshold: float = 0.6
