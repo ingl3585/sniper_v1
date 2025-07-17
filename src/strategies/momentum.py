@@ -98,9 +98,9 @@ class MomentumStrategy(BaseStrategy):
             prev_fast_ema = fast_ema
             prev_slow_ema = slow_ema
         
-        # Detect crossovers
-        bullish_crossover = (fast_ema > slow_ema and prev_fast_ema <= prev_slow_ema)
-        bearish_crossover = (fast_ema < slow_ema and prev_fast_ema >= prev_slow_ema)
+        # Detect trend state (persistent rather than momentary crossover)
+        bullish_signal = (fast_ema > slow_ema)
+        bearish_signal = (fast_ema < slow_ema)
         
         # Calculate trend strength
         trend_strength = self._calculate_trend_strength(prices, fast_ema, slow_ema)
@@ -136,29 +136,34 @@ class MomentumStrategy(BaseStrategy):
         self.logger.info(f"Previous Fast EMA: ${prev_fast_ema:.2f}")
         self.logger.info(f"Previous Slow EMA: ${prev_slow_ema:.2f}")
         
-        # Crossover analysis
+        # Trend state analysis
         ema_separation = abs(fast_ema - slow_ema)
         ema_separation_pct = (ema_separation / slow_ema) * 100
-        self.logger.info(f"EMA Crossover Analysis:")
+        self.logger.info(f"EMA Trend State Analysis:")
         self.logger.info(f"Current Separation: ${ema_separation:.2f} ({ema_separation_pct:.3f}%)")
-        self.logger.info(f"Bullish Crossover: {bullish_crossover} (Fast > Slow AND prev_fast <= prev_slow)")
-        self.logger.info(f"Bearish Crossover: {bearish_crossover} (Fast < Slow AND prev_fast >= prev_slow)")
+        self.logger.info(f"Bullish Trend State: {bullish_signal} (Fast > Slow)")
+        self.logger.info(f"Bearish Trend State: {bearish_signal} (Fast < Slow)")
         
-        # Trend strength breakdown
-        ema_sep_component = abs(fast_ema - slow_ema) / slow_ema
+        # Trend strength breakdown with ATR-based calculations
+        atr_for_debug = self.calculate_atr_simple(prices[-20:], period=10) if len(prices) >= 20 else prices[-1] * 0.01
+        ema_separation_points = abs(fast_ema - slow_ema)
+        ema_separation_strength = min(1.0, ema_separation_points / (atr_for_debug * 2.0))
+        
         momentum_prices = prices[-10:] if len(prices) >= 10 else prices
-        price_momentum = (prices[-1] - momentum_prices[0]) / momentum_prices[0] if len(momentum_prices) > 1 else 0
-        momentum_strength = abs(price_momentum)
+        price_momentum_points = abs(prices[-1] - momentum_prices[0]) if len(momentum_prices) > 1 else 0
+        momentum_strength_calc = min(1.0, price_momentum_points / (atr_for_debug * 3.0))
         
         recent_prices = prices[-10:] if len(prices) >= 10 else prices
         up_moves = sum(1 for i in range(1, len(recent_prices)) if recent_prices[i] > recent_prices[i-1]) if len(recent_prices) > 1 else 0
         direction_consistency = up_moves / (len(recent_prices) - 1) if len(recent_prices) > 1 else 0.5
-        if price_momentum < 0:
+        price_momentum_direction = prices[-1] - momentum_prices[0] if len(momentum_prices) > 1 else 0
+        if price_momentum_direction < 0:
             direction_consistency = 1.0 - direction_consistency
             
-        self.logger.info(f"Trend Strength Components:")
-        self.logger.info(f"EMA Separation: {ema_sep_component:.6f} (weight: 0.4)")
-        self.logger.info(f"Price Momentum: {price_momentum:.6f} -> Strength: {momentum_strength:.6f} (weight: 0.4)")
+        self.logger.info(f"Trend Strength Components (ATR-based):")
+        self.logger.info(f"ATR (10-period): ${atr_for_debug:.2f}")
+        self.logger.info(f"EMA Separation: {ema_separation_points:.2f} points / {atr_for_debug * 2.0:.2f} (2x ATR) = {ema_separation_strength:.6f} (weight: 0.4)")
+        self.logger.info(f"Price Momentum: {price_momentum_points:.2f} points / {atr_for_debug * 3.0:.2f} (3x ATR) = {momentum_strength_calc:.6f} (weight: 0.4)")
         self.logger.info(f"Direction Consistency: {direction_consistency:.6f} (weight: 0.2)")
         self.logger.info(f"Final Trend Strength: {trend_strength:.6f}")
         
@@ -201,13 +206,13 @@ class MomentumStrategy(BaseStrategy):
         self.logger.info(f"Trend Strong Enough: {trend_condition}")
         self.logger.info(f"Volume Confirmed: {volume_condition}")
         self.logger.info(f"Duration Sufficient: {duration_condition}")
-        self.logger.info(f"Bullish Signal: {bullish_crossover and trend_condition and volume_condition and duration_condition}")
-        self.logger.info(f"Bearish Signal: {bearish_crossover and trend_condition and volume_condition and duration_condition}")
+        self.logger.info(f"Bullish Signal: {bullish_signal and trend_condition and volume_condition and duration_condition}")
+        self.logger.info(f"Bearish Signal: {bearish_signal and trend_condition and volume_condition and duration_condition}")
         
         signal = None
         
         # Bullish momentum signal
-        if (bullish_crossover and 
+        if (bullish_signal and 
             trend_strength > self.config.trend_strength_threshold and
             volume_confirmation > 0.5 and
             self.trend_duration >= self.config.min_trend_duration):
@@ -226,12 +231,12 @@ class MomentumStrategy(BaseStrategy):
                 entry_price=current_price,
                 stop_price=stop_price,
                 target_price=target_price,
-                reason=f"Momentum buy {timeframe}: EMA crossover, strength={trend_strength:.2f}, vol_conf={volume_confirmation:.2f}",
+                reason=f"Momentum buy {timeframe}: Bullish trend, strength={trend_strength:.2f}, vol_conf={volume_confirmation:.2f}",
                 timestamp=datetime.now()
             )
         
         # Bearish momentum signal
-        elif (bearish_crossover and 
+        elif (bearish_signal and 
               trend_strength > self.config.trend_strength_threshold and
               volume_confirmation > 0.5 and
               self.trend_duration >= self.config.min_trend_duration):
@@ -250,23 +255,29 @@ class MomentumStrategy(BaseStrategy):
                 entry_price=current_price,
                 stop_price=stop_price,
                 target_price=target_price,
-                reason=f"Momentum sell {timeframe}: EMA crossover, strength={trend_strength:.2f}, vol_conf={volume_confirmation:.2f}",
+                reason=f"Momentum sell {timeframe}: Bearish trend, strength={trend_strength:.2f}, vol_conf={volume_confirmation:.2f}",
                 timestamp=datetime.now()
             )
         
         return signal
     
     def _calculate_trend_strength(self, prices: list, fast_ema: float, slow_ema: float) -> float:
-        """Calculate trend strength based on EMA separation and price action."""
+        """Calculate trend strength based on EMA separation and price action using ATR scaling."""
         if len(prices) < 20:
             return 0.0
         
-        # EMA separation strength
-        ema_separation = abs(fast_ema - slow_ema) / slow_ema
+        # Calculate ATR for scaling point-based measurements
+        atr = self.calculate_atr_simple(prices[-20:], period=10)
+        if atr <= 0:
+            atr = prices[-1] * 0.01  # Fallback: 1% of current price
         
-        # Price momentum strength
-        price_momentum = (prices[-1] - prices[-10]) / prices[-10]
-        momentum_strength = abs(price_momentum)
+        # EMA separation strength (scaled by ATR instead of percentage)
+        ema_separation_points = abs(fast_ema - slow_ema)
+        ema_separation_strength = min(1.0, ema_separation_points / (atr * 2.0))  # 2x ATR = max strength
+        
+        # Price momentum strength (scaled by ATR)
+        price_momentum_points = abs(prices[-1] - prices[-10])
+        momentum_strength = min(1.0, price_momentum_points / (atr * 3.0))  # 3x ATR = max momentum
         
         # Consistency of trend direction
         recent_prices = prices[-10:]
@@ -278,11 +289,12 @@ class MomentumStrategy(BaseStrategy):
             direction_consistency = up_moves / (len(recent_prices) - 1)
             
             # Adjust for downtrend
+            price_momentum = prices[-1] - prices[-10]
             if price_momentum < 0:
                 direction_consistency = 1.0 - direction_consistency
         
-        # Combined trend strength
-        trend_strength = (ema_separation * 0.4 + 
+        # Combined trend strength with ATR-based scaling
+        trend_strength = (ema_separation_strength * 0.4 + 
                          momentum_strength * 0.4 + 
                          direction_consistency * 0.2)
         

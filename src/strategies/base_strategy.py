@@ -74,10 +74,19 @@ class BaseStrategy(ABC):
             return np.mean(prices)
         
         multiplier = 2 / (period + 1)
-        ema = prices[0]
         
-        for price in prices[1:]:
+        # Start with SMA of first 'period' prices (proper EMA initialization)
+        ema = np.mean(prices[:period])
+        
+        # Apply EMA formula to remaining prices
+        for price in prices[period:]:
             ema = (price * multiplier) + (ema * (1 - multiplier))
+        
+        # Optional validation logging for debugging
+        if hasattr(self, 'logger') and hasattr(self, 'config') and hasattr(self.config, 'ema_debug_logging') and self.config.ema_debug_logging:
+            sma_start = np.mean(prices[:period])
+            final_ema = ema
+            self.logger.debug(f"EMA Calculation: Period={period}, SMA_start={sma_start:.2f}, Final_EMA={final_ema:.2f}, Points={len(prices)}")
         
         return ema
     
@@ -202,12 +211,48 @@ class BaseStrategy(ABC):
         return np.std(recent_returns) * np.sqrt(1440)  # Annualized (1440 minutes per day)
     
     def calculate_atr_simple(self, prices: List[float], period: int = 10) -> float:
-        """Calculate simple ATR approximation using price ranges."""
+        """Calculate ATR approximation using only close prices with improved True Range estimation."""
         if len(prices) < 2:
             return prices[0] * 0.01 if prices else 0.01  # 1% default
         
-        ranges = [abs(prices[i] - prices[i-1]) for i in range(1, len(prices))]
-        return np.mean(ranges[-period:]) if len(ranges) >= period else np.mean(ranges)
+        # Improved True Range approximation for close-only data
+        true_ranges = []
+        for i in range(1, len(prices)):
+            # Estimate High/Low from close prices using typical intrabar range
+            close_prev = prices[i-1]
+            close_curr = prices[i]
+            
+            # Estimate typical intrabar range as percentage of price movement
+            # This approximates the missing High/Low information
+            price_change = abs(close_curr - close_prev)
+            estimated_range = max(price_change, close_curr * 0.001)  # Minimum 0.1% range
+            
+            # For more volatile moves, increase the range estimate
+            if price_change > close_prev * 0.01:  # > 1% move
+                estimated_range *= 1.5  # Increase range estimate for large moves
+            
+            true_ranges.append(estimated_range)
+        
+        if len(true_ranges) < period:
+            return np.mean(true_ranges) if true_ranges else 0.01
+        
+        # Use exponential smoothing like proper ATR (Wilder's smoothing)
+        if len(true_ranges) >= period:
+            # Start with simple average of first 'period' values
+            atr = np.mean(true_ranges[:period])
+            
+            # Apply Wilder's smoothing to remaining values
+            for tr in true_ranges[period:]:
+                atr = ((atr * (period - 1)) + tr) / period
+            
+            # Optional validation logging for debugging
+            if hasattr(self, 'logger') and hasattr(self, 'config') and hasattr(self.config, 'atr_debug_logging') and self.config.atr_debug_logging:
+                simple_avg = np.mean(true_ranges)
+                self.logger.debug(f"ATR Calculation: Period={period}, Simple_avg={simple_avg:.4f}, Wilder_ATR={atr:.4f}, Points={len(true_ranges)}")
+            
+            return atr
+        else:
+            return np.mean(true_ranges)
     
     def calculate_position_size(self, market_data: MarketData, 
                               stop_price: float) -> int:
