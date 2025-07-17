@@ -236,7 +236,6 @@ namespace NinjaTrader.NinjaScript.Strategies
                 buying_power = Account.Get(AccountItem.ExcessIntradayMargin, Currency.UsDollar),
                 daily_pnl = Account.Get(AccountItem.RealizedProfitLoss, Currency.UsDollar) - sessionStartPnL,
                 unrealized_pnl = Account.Get(AccountItem.UnrealizedProfitLoss, Currency.UsDollar),
-                volatility = CalculateVolatility(),
                 timestamp = new DateTimeOffset(Time[0]).ToUnixTimeSeconds()
             };
             SendJson(md);
@@ -254,29 +253,6 @@ namespace NinjaTrader.NinjaScript.Strategies
             stream.Write(body, 0, body.Length);
         }
 
-        private double CalculateVolatility()
-        {
-            if (price1m.Count < 20) return 0.02;
-            
-            // Calculate rolling standard deviation of returns (more accurate volatility measure)
-            var returns = new List<double>();
-            for (int i = 1; i < price1m.Count; i++)
-            {
-                if (price1m[i - 1] > 0)
-                    returns.Add(Math.Log(price1m[i] / price1m[i - 1]));
-            }
-            
-            if (returns.Count < 2) return 0.02;
-            
-            // Calculate standard deviation of returns
-            double mean = returns.Average();
-            double sumSquaredDeviations = returns.Sum(x => Math.Pow(x - mean, 2));
-            double variance = sumSquaredDeviations / (returns.Count - 1);
-            double stdDev = Math.Sqrt(variance);
-            
-            // Annualized volatility (assuming 1440 minutes per day)
-            return stdDev * Math.Sqrt(1440);
-        }
 
         private void StartSignalThread()
         {

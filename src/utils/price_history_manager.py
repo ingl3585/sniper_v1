@@ -69,24 +69,29 @@ class PriceHistoryManager:
             # Update 1m data
             if market_data.price_1m and market_data.volume_1m:
                 self._update_timeframe('1m', market_data.price_1m, market_data.volume_1m)
+                self.last_update['1m'] = market_data.timestamp
             
             # Update 5m data
             if market_data.price_5m and market_data.volume_5m:
                 self._update_timeframe('5m', market_data.price_5m, market_data.volume_5m)
+                self.last_update['5m'] = market_data.timestamp
             
             # Update 15m data
             if market_data.price_15m and market_data.volume_15m:
                 self._update_timeframe('15m', market_data.price_15m, market_data.volume_15m)
+                self.last_update['15m'] = market_data.timestamp
             
             # Update 30m data
             if market_data.price_30m and market_data.volume_30m:
                 self._update_timeframe('30m', market_data.price_30m, market_data.volume_30m)
+                self.last_update['30m'] = market_data.timestamp
             
             # Update 1h data
             if market_data.price_1h and market_data.volume_1h:
                 self._update_timeframe('1h', market_data.price_1h, market_data.volume_1h)
+                self.last_update['1h'] = market_data.timestamp
     
-    def _update_timeframe(self, timeframe: str, price_list: List[float], volume_list: List[float], market_data: MarketData):
+    def _update_timeframe(self, timeframe: str, price_list: List[float], volume_list: List[float]):
         """Update a specific timeframe with new data."""
         if timeframe not in self.timeframes:
             return
@@ -108,7 +113,7 @@ class PriceHistoryManager:
                 tf_data.volumes[-1] != volume_list[-1]):
                 tf_data.add_data(price_list[-1], volume_list[-1])
         
-        self.last_update[timeframe] = market_data.timestamp if hasattr(market_data, 'timestamp') else 0
+        # Timestamp will be updated by the calling update_from_market_data method
     
     def get_prices(self, timeframe: str, length: Optional[int] = None) -> List[float]:
         """Get price data for a specific timeframe."""

@@ -97,13 +97,48 @@ class MeanReversionStrategy(BaseStrategy):
         atr_period = min(self.config.atr_lookback, len(prices))
         atr = self.calculate_atr_simple(prices[-atr_period:])
         
-        # Log all calculated values
-        self.logger.info(f"{timeframe} Mean Reversion Analysis:")
-        self.logger.info(f"Price: ${current_price:.2f}, Volume: {current_volume:.0f}")
-        self.logger.info(f"VWAP: ${vwap:.2f}, Deviation: {current_deviation:.4f}")
-        self.logger.info(f"Z-Score: {z_score:.2f}, RSI: {rsi:.1f}")
-        self.logger.info(f"ATR: ${atr:.2f}, Std Dev: {std_dev:.6f}")
-        self.logger.info(f"Thresholds: Z±{self.config.deviation_threshold}, RSI {self.config.rsi_oversold}/{self.config.rsi_overbought}")
+        # Log all calculated values with detailed breakdown
+        self.logger.info(f"=== {timeframe} Mean Reversion Analysis ===")
+        self.logger.info(f"Current Price: ${current_price:.2f}")
+        self.logger.info(f"Current Volume: {current_volume:.0f}")
+        self.logger.info(f"Data Points: {len(prices)} prices, {len(volumes)} volumes")
+        
+        # VWAP calculation details
+        vwap_prices = prices[-self.config.vwap_period:]
+        vwap_volumes = volumes[-self.config.vwap_period:]
+        self.logger.info(f"VWAP Period: {self.config.vwap_period} bars")
+        self.logger.info(f"VWAP Price Range: ${min(vwap_prices):.2f} - ${max(vwap_prices):.2f}")
+        self.logger.info(f"VWAP Volume Range: {min(vwap_volumes):.0f} - {max(vwap_volumes):.0f}")
+        self.logger.info(f"Calculated VWAP: ${vwap:.2f}")
+        
+        # Deviation analysis
+        self.logger.info(f"Price vs VWAP: ${current_price:.2f} vs ${vwap:.2f}")
+        self.logger.info(f"Raw Deviation: {current_deviation:.6f} ({current_deviation*100:.2f}%)")
+        self.logger.info(f"Standard Deviation: {std_dev:.6f}")
+        self.logger.info(f"Z-Score: {z_score:.3f}")
+        
+        # RSI details
+        rsi_prices = prices[-20:]
+        self.logger.info(f"RSI Period: 20 bars (last 20 prices)")
+        self.logger.info(f"RSI Price Range: ${min(rsi_prices):.2f} - ${max(rsi_prices):.2f}")
+        self.logger.info(f"Calculated RSI: {rsi:.2f}")
+        
+        # ATR details
+        self.logger.info(f"ATR Period: {atr_period} bars")
+        self.logger.info(f"Calculated ATR: ${atr:.2f}")
+        
+        # Threshold checks
+        self.logger.info(f"Thresholds Check:")
+        self.logger.info(f"Z-Score {z_score:.3f} vs ±{self.config.deviation_threshold}")
+        self.logger.info(f"RSI {rsi:.2f} vs {self.config.rsi_oversold}/{self.config.rsi_overbought}")
+        self.logger.info(f"Volume {current_volume:.0f} vs {self.config.min_volume_threshold}")
+        
+        # Signal conditions
+        oversold = z_score < -self.config.deviation_threshold and rsi < self.config.rsi_oversold
+        overbought = z_score > self.config.deviation_threshold and rsi > self.config.rsi_overbought
+        self.logger.info(f"Signal Conditions:")
+        self.logger.info(f"Oversold: {oversold} (z < -{self.config.deviation_threshold} AND rsi < {self.config.rsi_oversold})")
+        self.logger.info(f"Overbought: {overbought} (z > {self.config.deviation_threshold} AND rsi > {self.config.rsi_overbought})")
         
         # Mean reversion signals
         signal = None

@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from datetime import datetime
 import logging
 from queue import Queue, Empty
+import numpy as np
 
 
 @dataclass
@@ -33,8 +34,26 @@ class MarketData:
     unrealized_pnl: float
     open_positions: int
     current_price: float
-    volatility: float
     timestamp: int
+    
+    @property
+    def volatility(self) -> float:
+        """Calculate volatility from 1m price data (computed on-demand)."""
+        if len(self.price_1m) < 20:
+            return 0.02  # Default volatility
+        
+        # Calculate log returns
+        returns = []
+        for i in range(1, len(self.price_1m)):
+            if self.price_1m[i-1] > 0:
+                returns.append(np.log(self.price_1m[i] / self.price_1m[i-1]))
+        
+        if len(returns) < 2:
+            return 0.02
+        
+        # Use the last 20 returns for rolling volatility
+        recent_returns = returns[-20:]
+        return np.std(recent_returns) * np.sqrt(1440)  # Annualized
 
 
 @dataclass
@@ -111,6 +130,10 @@ class NinjaTradeBridge:
         # Start signal listener  
         self.signal_thread = threading.Thread(target=self._listen_signals, daemon=True)
         self.signal_thread.start()
+        
+        # Start signal queue processor
+        self.signal_processor_thread = threading.Thread(target=self._process_signal_queue, daemon=True)
+        self.signal_processor_thread.start()
         
         self.logger.info(f"Bridge started - Data: {self.data_port}, Signals: {self.signal_port}")
     
@@ -258,28 +281,44 @@ class NinjaTradeBridge:
         return data
     
     def _handle_message(self, message: Dict[str, Any]):
-        """Handle incoming message from NinjaScript."""
-        msg_type = message.get('type', '')
-        
-        if msg_type == 'historical_data':
-            self.historical_data = message
-            if self.on_historical_data:
-                self.on_historical_data(message)
-            self.logger.info("Historical data received")
-        
-        elif msg_type == 'live_data':
-            self.latest_market_data = self._parse_market_data(message)
-            if self.on_market_data:
-                self.on_market_data(self.latest_market_data)
-        
-        elif msg_type == 'trade_completion':
-            trade_completion = self._parse_trade_completion(message)
-            if self.on_trade_completion:
-                self.on_trade_completion(trade_completion)
-            self.logger.info(f"Trade completed: PnL ${trade_completion.pnl:.2f}")
-        
-        else:
-            self.logger.warning(f"Unknown message type: {msg_type}")
+        """Handle incoming message from NinjaScript (thread-safe)."""
+        try:
+            msg_type = message.get('type', '')
+            
+            if msg_type == 'historical_data':
+                with self._data_lock:
+                    self.historical_data = message
+                if self.on_historical_data:
+                    try:
+                        self.on_historical_data(message)
+                    except Exception as e:
+                        self.logger.error(f"Error in historical data callback: {e}")
+                self.logger.info("Historical data received")
+            
+            elif msg_type == 'live_data':
+                market_data = self._parse_market_data(message)
+                with self._data_lock:
+                    self.latest_market_data = market_data
+                if self.on_market_data:
+                    try:
+                        self.on_market_data(market_data)
+                    except Exception as e:
+                        self.logger.error(f"Error in market data callback: {e}")
+            
+            elif msg_type == 'trade_completion':
+                trade_completion = self._parse_trade_completion(message)
+                if self.on_trade_completion:
+                    try:
+                        self.on_trade_completion(trade_completion)
+                    except Exception as e:
+                        self.logger.error(f"Error in trade completion callback: {e}")
+                self.logger.info(f"Trade completed: PnL ${trade_completion.pnl:.2f}")
+            
+            else:
+                self.logger.warning(f"Unknown message type: {msg_type}")
+                
+        except Exception as e:
+            self.logger.error(f"Error handling message: {e}")
     
     def _parse_market_data(self, message: Dict[str, Any]) -> MarketData:
         """Parse market data message into MarketData object."""
@@ -300,7 +339,6 @@ class NinjaTradeBridge:
             unrealized_pnl=message.get('unrealized_pnl', 0.0),
             open_positions=message.get('open_positions', 0),
             current_price=message.get('current_price', 0.0),
-            volatility=message.get('volatility', 0.0),
             timestamp=message.get('timestamp', 0)
         )
     
@@ -391,17 +429,21 @@ class NinjaTradeBridge:
                 return False
     
     def get_latest_data(self) -> Optional[MarketData]:
-        """Get the most recent market data."""
-        return self.latest_market_data
+        """Get the most recent market data (thread-safe)."""
+        with self._data_lock:
+            return self.latest_market_data
     
     def get_historical_data(self) -> Dict[str, Any]:
-        """Get historical data received from NinjaScript."""
-        return self.historical_data
+        """Get historical data received from NinjaScript (thread-safe)."""
+        with self._data_lock:
+            return self.historical_data.copy() if self.historical_data else {}
     
     def is_connected(self) -> bool:
-        """Check if bridge is connected to NinjaScript."""
-        return self.data_socket is not None
+        """Check if bridge is connected to NinjaScript (thread-safe)."""
+        with self._data_lock:
+            return self.data_socket is not None
     
     def is_fully_connected(self) -> bool:
-        """Check if both data and signal sockets are connected."""
-        return self.data_socket is not None and self.signal_socket is not None
+        """Check if both data and signal sockets are connected (thread-safe)."""
+        with self._data_lock, self._signal_lock:
+            return self.data_socket is not None and self.signal_socket is not None

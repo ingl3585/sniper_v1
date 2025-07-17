@@ -110,16 +110,94 @@ class MomentumStrategy(BaseStrategy):
         atr_period = min(self.config.atr_lookback, len(prices))
         atr = self.calculate_atr_simple(prices[-atr_period:])
         
-        # Log all calculated values
-        self.logger.info(f"{timeframe} Momentum Analysis:")
-        self.logger.info(f"Price: ${current_price:.2f}")
-        self.logger.info(f"EMA Fast: ${fast_ema:.2f}, Slow: ${slow_ema:.2f}")
-        self.logger.info(f"Prev Fast: ${prev_fast_ema:.2f}, Prev Slow: ${prev_slow_ema:.2f}")
-        self.logger.info(f"Crossover: Bull={bullish_crossover}, Bear={bearish_crossover}")
-        self.logger.info(f"Trend Strength: {trend_strength:.3f}, Volume Conf: {volume_confirmation:.3f}")
-        self.logger.info(f"Trend Direction: {self.trend_direction}, Duration: {self.trend_duration}")
-        self.logger.info(f"ATR: ${atr:.2f}")
-        self.logger.info(f"Thresholds: Trend>{self.config.trend_strength_threshold}, Vol>0.5, Duration>{self.config.min_trend_duration}")
+        # Log all calculated values with detailed breakdown
+        self.logger.info(f"=== {timeframe} Momentum Analysis ===")
+        self.logger.info(f"Current Price: ${current_price:.2f}")
+        self.logger.info(f"Data Points: {len(prices)} prices, {len(volumes)} volumes")
+        
+        # EMA calculation details
+        fast_period_prices = prices[-self.config.fast_ema_period:]
+        slow_period_prices = prices[-self.config.slow_ema_period:]
+        self.logger.info(f"EMA Calculations:")
+        self.logger.info(f"Fast EMA Period: {self.config.fast_ema_period} bars")
+        self.logger.info(f"Fast EMA Price Range: ${min(fast_period_prices):.2f} - ${max(fast_period_prices):.2f}")
+        self.logger.info(f"Calculated Fast EMA: ${fast_ema:.2f}")
+        self.logger.info(f"Slow EMA Period: {self.config.slow_ema_period} bars")
+        self.logger.info(f"Slow EMA Price Range: ${min(slow_period_prices):.2f} - ${max(slow_period_prices):.2f}")
+        self.logger.info(f"Calculated Slow EMA: ${slow_ema:.2f}")
+        
+        # Previous EMA values for crossover detection
+        self.logger.info(f"Previous EMA Values:")
+        self.logger.info(f"Previous Fast EMA: ${prev_fast_ema:.2f}")
+        self.logger.info(f"Previous Slow EMA: ${prev_slow_ema:.2f}")
+        
+        # Crossover analysis
+        ema_separation = abs(fast_ema - slow_ema)
+        ema_separation_pct = (ema_separation / slow_ema) * 100
+        self.logger.info(f"EMA Crossover Analysis:")
+        self.logger.info(f"Current Separation: ${ema_separation:.2f} ({ema_separation_pct:.3f}%)")
+        self.logger.info(f"Bullish Crossover: {bullish_crossover} (Fast > Slow AND prev_fast <= prev_slow)")
+        self.logger.info(f"Bearish Crossover: {bearish_crossover} (Fast < Slow AND prev_fast >= prev_slow)")
+        
+        # Trend strength breakdown
+        ema_sep_component = abs(fast_ema - slow_ema) / slow_ema
+        momentum_prices = prices[-10:] if len(prices) >= 10 else prices
+        price_momentum = (prices[-1] - momentum_prices[0]) / momentum_prices[0] if len(momentum_prices) > 1 else 0
+        momentum_strength = abs(price_momentum)
+        
+        recent_prices = prices[-10:] if len(prices) >= 10 else prices
+        up_moves = sum(1 for i in range(1, len(recent_prices)) if recent_prices[i] > recent_prices[i-1]) if len(recent_prices) > 1 else 0
+        direction_consistency = up_moves / (len(recent_prices) - 1) if len(recent_prices) > 1 else 0.5
+        if price_momentum < 0:
+            direction_consistency = 1.0 - direction_consistency
+            
+        self.logger.info(f"Trend Strength Components:")
+        self.logger.info(f"EMA Separation: {ema_sep_component:.6f} (weight: 0.4)")
+        self.logger.info(f"Price Momentum: {price_momentum:.6f} -> Strength: {momentum_strength:.6f} (weight: 0.4)")
+        self.logger.info(f"Direction Consistency: {direction_consistency:.6f} (weight: 0.2)")
+        self.logger.info(f"Final Trend Strength: {trend_strength:.6f}")
+        
+        # Volume confirmation breakdown
+        recent_volumes = volumes[-self.config.volume_confirmation_period:] if len(volumes) >= self.config.volume_confirmation_period else volumes
+        avg_volume = np.mean(volumes[-20:] if len(volumes) >= 20 else volumes)
+        current_volume = volumes[-1]
+        volume_ratio = current_volume / avg_volume if avg_volume > 0 else 1.0
+        self.logger.info(f"Volume Confirmation:")
+        self.logger.info(f"Volume Period: {self.config.volume_confirmation_period} bars")
+        self.logger.info(f"Current Volume: {current_volume:.0f}")
+        self.logger.info(f"Average Volume (20-bar): {avg_volume:.0f}")
+        self.logger.info(f"Volume Ratio: {volume_ratio:.3f}")
+        self.logger.info(f"Volume Confirmation Score: {volume_confirmation:.6f}")
+        
+        # Trend tracking
+        self.logger.info(f"Trend Tracking:")
+        self.logger.info(f"Current Direction: {self.trend_direction} (1=up, -1=down, 0=neutral)")
+        self.logger.info(f"Trend Duration: {self.trend_duration} bars")
+        
+        # ATR details
+        atr_prices = prices[-atr_period:]
+        self.logger.info(f"ATR Calculation:")
+        self.logger.info(f"ATR Period: {atr_period} bars")
+        self.logger.info(f"ATR Price Range: ${min(atr_prices):.2f} - ${max(atr_prices):.2f}")
+        self.logger.info(f"Calculated ATR: ${atr:.2f}")
+        
+        # Threshold checks
+        self.logger.info(f"Threshold Analysis:")
+        self.logger.info(f"Trend Strength: {trend_strength:.6f} vs {self.config.trend_strength_threshold}")
+        self.logger.info(f"Volume Confirmation: {volume_confirmation:.6f} vs 0.5")
+        self.logger.info(f"Trend Duration: {self.trend_duration} vs {self.config.min_trend_duration}")
+        
+        # Signal conditions
+        trend_condition = trend_strength > self.config.trend_strength_threshold
+        volume_condition = volume_confirmation > 0.5
+        duration_condition = self.trend_duration >= self.config.min_trend_duration
+        
+        self.logger.info(f"Signal Conditions:")
+        self.logger.info(f"Trend Strong Enough: {trend_condition}")
+        self.logger.info(f"Volume Confirmed: {volume_condition}")
+        self.logger.info(f"Duration Sufficient: {duration_condition}")
+        self.logger.info(f"Bullish Signal: {bullish_crossover and trend_condition and volume_condition and duration_condition}")
+        self.logger.info(f"Bearish Signal: {bearish_crossover and trend_condition and volume_condition and duration_condition}")
         
         signal = None
         

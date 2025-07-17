@@ -33,7 +33,7 @@ class DataManager:
     
     def _initialize_tables(self):
         """Initialize database tables."""
-        # Market data table with 30m fields
+        # Market data table with 30m fields (volatility calculated on-demand)
         self.conn.execute("""
             CREATE TABLE IF NOT EXISTS market_data (
                 timestamp TIMESTAMP,
@@ -52,8 +52,7 @@ class DataManager:
                 daily_pnl DOUBLE,
                 unrealized_pnl DOUBLE,
                 open_positions INTEGER,
-                current_price DOUBLE,
-                volatility DOUBLE
+                current_price DOUBLE
             )
         """)
         
@@ -106,7 +105,7 @@ class DataManager:
             
             self.conn.execute("""
                 INSERT INTO market_data VALUES (
-                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
                 )
             """, (
                 timestamp,
@@ -125,8 +124,7 @@ class DataManager:
                 market_data.daily_pnl,
                 market_data.unrealized_pnl,
                 market_data.open_positions,
-                market_data.current_price,
-                market_data.volatility
+                market_data.current_price
             ))
             
             # Note: Using DuckDB as primary storage, parquet only for archival
@@ -353,8 +351,7 @@ class DataManager:
                     'daily_pnl': data.daily_pnl,
                     'unrealized_pnl': data.unrealized_pnl,
                     'open_positions': data.open_positions,
-                    'current_price': data.current_price,
-                    'volatility': data.volatility
+                    'current_price': data.current_price
                 }])
             elif isinstance(data, TradeCompletion):
                 df = pd.DataFrame([{
