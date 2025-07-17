@@ -64,7 +64,7 @@ class TradingSystem:
         # Orchestration components
         self.signal_processor = SignalProcessor(self.mean_reversion, self.momentum, self.meta_allocator, self.execution_agent)
         self.risk_manager = RiskManager(self.config)
-        self.connection_manager = ConnectionManager(self.bridge, self.data_manager)
+        self.connection_manager = ConnectionManager(self.bridge, self.data_manager, self.price_history_manager)
         
         # Setup bridge callbacks
         self.bridge.on_historical_data = self._on_historical_data
@@ -128,7 +128,6 @@ class TradingSystem:
     
     def _on_historical_data(self, historical_data):
         """Handle historical data from NinjaTrader."""
-        self.logger.info("Historical data received")
         self.connection_manager.initialize_strategies(historical_data)
     
     def _on_market_data(self, market_data: MarketData):

@@ -27,13 +27,17 @@ class MomentumStrategy(BaseStrategy):
     def generate_signal(self, market_data: MarketData) -> Optional[Signal]:
         """Generate momentum signal based on EMA crossovers and trend strength."""
         if not self.should_trade(market_data):
+            self.logger.info("Momentum: should_trade() returned False")
             return None
         
         # Update price and volume history
         self.update_price_history(market_data)
+        self.logger.info("Momentum: Updated price history, checking data sufficiency...")
         
         # Need sufficient history for EMA calculation
         if not self.price_history_manager.has_sufficient_data('1h', self.config.slow_ema_period):
+            current_1h_length = self.price_history_manager.get_data_length('1h')
+            self.logger.info(f"Momentum: Insufficient 1h data - need {self.config.slow_ema_period}, have {current_1h_length}")
             return None
         
         # Analyze trend on 1h timeframe
@@ -77,6 +81,7 @@ class MomentumStrategy(BaseStrategy):
     def _analyze_trend(self, prices: list, volumes: list, timeframe: str) -> Optional[Signal]:
         """Analyze trend strength and direction for momentum signals."""
         if len(prices) < self.config.slow_ema_period:
+            self.logger.info(f"{timeframe}: Insufficient data for EMA - need {self.config.slow_ema_period}, have {len(prices)}")
             return None
         
         current_price = prices[-1]

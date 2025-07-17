@@ -24,14 +24,17 @@ class MeanReversionStrategy(BaseStrategy):
     def generate_signal(self, market_data: MarketData) -> Optional[Signal]:
         """Generate mean reversion signal based on VWAP deviation."""
         if not self.should_trade(market_data):
+            self.logger.info("Mean Reversion: should_trade() returned False")
             return None
         
         # Update price and volume history
         self.update_price_history(market_data)
+        self.logger.info("Mean Reversion: Updated price history, checking data sufficiency...")
         
         # Check if we have sufficient data for analysis
         if not self.price_history_manager.has_sufficient_data('5m', self.config.vwap_period):
-            self.logger.debug(f"Mean Reversion: Insufficient 5m data - need {self.config.vwap_period}")
+            current_5m_length = self.price_history_manager.get_data_length('5m')
+            self.logger.info(f"Mean Reversion: Insufficient 5m data - need {self.config.vwap_period}, have {current_5m_length}")
             return None
         
         # Calculate VWAP and deviation for 5m timeframe
@@ -58,7 +61,7 @@ class MeanReversionStrategy(BaseStrategy):
     def _analyze_timeframe(self, prices: list, volumes: list, timeframe: str) -> Optional[Signal]:
         """Analyze a specific timeframe for mean reversion opportunities."""
         if len(prices) < self.config.vwap_period or len(volumes) < self.config.vwap_period:
-            self.logger.debug(f"{timeframe}: Insufficient data - need {self.config.vwap_period}, have {len(prices)} prices, {len(volumes)} volumes")
+            self.logger.info(f"{timeframe}: Insufficient data - need {self.config.vwap_period}, have {len(prices)} prices, {len(volumes)} volumes")
             return None
         
         current_price = prices[-1]
