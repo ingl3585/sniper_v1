@@ -93,8 +93,31 @@ class BaseStrategy(ABC):
         if len(prices) != len(volumes) or len(prices) == 0:
             return 0.0
         
+        # Validate inputs
+        if any(v <= 0 for v in volumes):
+            # Handle zero/negative volumes by using equal weights
+            return sum(prices) / len(prices)
+        
+        if any(p <= 0 for p in prices):
+            # Log warning for negative prices but continue
+            print(f"Warning: Negative price found in VWAP calculation: {[p for p in prices if p <= 0]}")
+        
+        # Standard VWAP calculation: sum(price * volume) / sum(volume)
         price_volume = [p * v for p, v in zip(prices, volumes)]
-        return sum(price_volume) / sum(volumes)
+        total_pv = sum(price_volume)
+        total_volume = sum(volumes)
+        
+        if total_volume == 0:
+            return 0.0
+        
+        vwap = total_pv / total_volume
+        
+        # Validate result
+        if vwap <= 0:
+            print(f"Warning: VWAP calculation resulted in non-positive value: {vwap}")
+            return sum(prices) / len(prices)  # Fallback to simple average
+        
+        return vwap
     
     def calculate_bollinger_bands(self, prices: List[float], period: int = 20, 
                                 std_dev: float = 2.0) -> tuple[float, float, float]:
@@ -111,23 +134,52 @@ class BaseStrategy(ABC):
         
         return upper_band, sma, lower_band
     
-    def calculate_rsi(self, prices: List[float], period: int = 14) -> float:
-        """Calculate Relative Strength Index."""
+    def calculate_rsi(self, prices: List[float], period: int = 14, debug: bool = False) -> float:
+        """Calculate Relative Strength Index using Wilder's exponential smoothing method."""
         if len(prices) < period + 1:
             return 50.0
         
+        # Calculate price changes
         deltas = [prices[i] - prices[i-1] for i in range(1, len(prices))]
         gains = [d if d > 0 else 0 for d in deltas]
         losses = [-d if d < 0 else 0 for d in deltas]
         
-        avg_gain = np.mean(gains[-period:])
-        avg_loss = np.mean(losses[-period:])
+        if debug:
+            print(f"RSI Debug - Period: {period}, Price points: {len(prices)}")
+            print(f"Last 5 deltas: {deltas[-5:]}")
+            print(f"Last 5 gains: {gains[-5:]}")
+            print(f"Last 5 losses: {losses[-5:]}")
+        
+        # Use Wilder's exponential smoothing (standard RSI method)
+        # First calculation uses simple average for initial values
+        if len(gains) < period:
+            return 50.0
+            
+        # Initial values - simple average of first 'period' values
+        avg_gain = np.mean(gains[:period])
+        avg_loss = np.mean(losses[:period])
+        
+        if debug:
+            print(f"Initial avg_gain: {avg_gain:.6f}")
+            print(f"Initial avg_loss: {avg_loss:.6f}")
+        
+        # Apply Wilder's smoothing for subsequent values
+        # Wilder's smoothing: New_avg = ((Previous_avg * (period-1)) + Current_value) / period
+        for i in range(period, len(gains)):
+            avg_gain = ((avg_gain * (period - 1)) + gains[i]) / period
+            avg_loss = ((avg_loss * (period - 1)) + losses[i]) / period
+            
+            if debug and i >= len(gains) - 3:  # Debug last few calculations
+                print(f"Step {i}: gain={gains[i]:.6f}, avg_gain={avg_gain:.6f}, avg_loss={avg_loss:.6f}")
         
         if avg_loss == 0:
             return 100.0
         
         rs = avg_gain / avg_loss
         rsi = 100 - (100 / (1 + rs))
+        
+        if debug:
+            print(f"Final: avg_gain={avg_gain:.6f}, avg_loss={avg_loss:.6f}, RS={rs:.6f}, RSI={rsi:.2f}")
         
         return rsi
     

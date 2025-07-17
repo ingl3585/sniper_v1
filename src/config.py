@@ -62,11 +62,26 @@ class MeanReversionConfig:
     
     # Strategy Parameters
     vwap_period: int = 20
-    deviation_threshold: float = 2.0
+    # deviation_threshold: float = 2.0  # Original conservative threshold
+    deviation_threshold: float = 1.5     # Adjusted for more trading opportunities
     min_volume_threshold: float = 1000
-    rsi_oversold: float = 30
-    rsi_overbought: float = 70
+    # rsi_oversold: float = 30          # Original conservative threshold
+    # rsi_overbought: float = 70        # Original conservative threshold
+    rsi_oversold: float = 35             # Adjusted for more trading opportunities
+    rsi_overbought: float = 65           # Adjusted for more trading opportunities
     profit_target_multiplier: float = 1.5
+    
+    # 1-Minute Timeframe Confirmation Settings
+    enable_1m_confirmation: bool = True
+    deviation_threshold_1m: float = 1.0  # Tighter threshold for 1m due to noise
+    min_1m_volume_threshold: float = 500  # Lower threshold for 1m bars
+    max_trades_per_hour: int = 6         # Rate limiting for 1m-triggered trades
+    min_time_between_trades_minutes: int = 5  # Minimum gap between 1m signals
+    
+    # RSI Calculation Settings
+    rsi_period: int = 14                 # Standard RSI period
+    rsi_use_wilder_smoothing: bool = True  # Use Wilder's exponential smoothing (standard)
+    rsi_debug_logging: bool = False      # Enable detailed RSI calculation logging
 
 
 @dataclass
@@ -81,8 +96,11 @@ class MomentumConfig:
     
     # Strategy Parameters
     fast_ema_period: int = 20
-    slow_ema_period: int = 100
-    trend_strength_threshold: float = 0.6
+    # slow_ema_period: int = 100         # Original - requires 100 hours (~4+ days)
+    slow_ema_period: int = 50            # Adjusted for faster testing - requires 50 hours (~2 days)
+    # trend_strength_threshold: float = 0.6  # Original conservative threshold
+    # trend_strength_threshold: float = 0.4   # Previously adjusted for more trading opportunities
+    trend_strength_threshold: float = 0.15    # Adjusted for range-bound market conditions (July 2025)
     volume_confirmation_period: int = 10
     trail_stop_atr_multiplier: float = 3.0
     min_trend_duration: int = 5

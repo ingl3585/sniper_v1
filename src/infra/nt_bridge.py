@@ -37,6 +37,24 @@ class MarketData:
     timestamp: int
     
     @property
+    def data_age_seconds(self) -> float:
+        """Calculate age of market data in seconds."""
+        current_time = int(time.time() * 1000)  # Current time in milliseconds
+        return (current_time - self.timestamp) / 1000.0
+    
+    def get_data_freshness_warning(self) -> str:
+        """Get warning message if data is stale."""
+        age = self.data_age_seconds
+        if age > 300:  # 5 minutes
+            return f"⚠️  STALE DATA: {age:.0f}s old"
+        elif age > 120:  # 2 minutes
+            return f"⚠️  Aging data: {age:.0f}s old"
+        elif age > 60:  # 1 minute
+            return f"Data age: {age:.0f}s"
+        else:
+            return f"Fresh data: {age:.0f}s"
+    
+    @property
     def volatility(self) -> float:
         """Calculate volatility from 1m price data (computed on-demand)."""
         if len(self.price_1m) < 20:
@@ -322,6 +340,47 @@ class NinjaTradeBridge:
     
     def _parse_market_data(self, message: Dict[str, Any]) -> MarketData:
         """Parse market data message into MarketData object."""
+        # Handle timestamp with proper fallback and logging
+        raw_timestamp = message.get('timestamp')
+        current_time_ms = int(time.time() * 1000)
+        
+        if raw_timestamp is not None:
+            # Debug: Log what timestamp format we're receiving
+            self.logger.info(f"Received timestamp from NT: {raw_timestamp} (type: {type(raw_timestamp)})")
+            
+            # Handle different timestamp formats that NinjaTrader might send
+            if isinstance(raw_timestamp, str):
+                try:
+                    # Try parsing as ISO format or other string formats
+                    from datetime import datetime
+                    dt = datetime.fromisoformat(raw_timestamp.replace('Z', '+00:00'))
+                    timestamp = int(dt.timestamp() * 1000)
+                    self.logger.info(f"Parsed string timestamp: {raw_timestamp} -> {timestamp}")
+                except:
+                    # If parsing fails, use current time
+                    timestamp = current_time_ms
+                    self.logger.warning(f"Failed to parse timestamp string: {raw_timestamp}, using current time")
+            elif isinstance(raw_timestamp, (int, float)):
+                # Check if timestamp is in seconds (need to convert to milliseconds)
+                if raw_timestamp < 1e10:  # Likely seconds (before year 2286)
+                    timestamp = int(raw_timestamp * 1000)
+                    self.logger.info(f"Converted seconds timestamp: {raw_timestamp} -> {timestamp}")
+                else:
+                    timestamp = int(raw_timestamp)
+                    self.logger.info(f"Using milliseconds timestamp: {raw_timestamp}")
+            else:
+                timestamp = current_time_ms
+                self.logger.warning(f"Unknown timestamp type: {type(raw_timestamp)}, using current time")
+        else:
+            timestamp = current_time_ms
+            self.logger.debug(f"No timestamp from NinjaTrader, using current time: {timestamp}")
+        
+        # Validate timestamp is reasonable (within last 24 hours)
+        time_diff = abs(current_time_ms - timestamp)
+        if time_diff > 86400000:  # 24 hours in milliseconds
+            self.logger.warning(f"Timestamp seems invalid (diff: {time_diff/1000:.0f}s), using current time")
+            timestamp = current_time_ms
+        
         return MarketData(
             price_1m=message.get('price_1m', []),
             price_5m=message.get('price_5m', []),
@@ -339,7 +398,7 @@ class NinjaTradeBridge:
             unrealized_pnl=message.get('unrealized_pnl', 0.0),
             open_positions=message.get('open_positions', 0),
             current_price=message.get('current_price', 0.0),
-            timestamp=message.get('timestamp', 0)
+            timestamp=timestamp
         )
     
     def _parse_trade_completion(self, message: Dict[str, Any]) -> TradeCompletion:
