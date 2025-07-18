@@ -3,6 +3,7 @@ Risk Management System
 Handles position limits, daily loss limits, and emergency actions.
 """
 import logging
+import time
 from src.infra.nt_bridge import MarketData, TradeSignal
 
 
@@ -15,16 +16,19 @@ class RiskManager:
     
     def should_trade(self, market_data: MarketData) -> bool:
         """Check if conditions are suitable for trading."""
-        self.logger.debug("=== Risk Check Start ===")
+        # Risk check
         
         # Check account balance
         if market_data.account_balance < self.config.trading.min_account_balance:
             self.logger.warning(f"RISK BLOCK: Account balance too low: ${market_data.account_balance:.2f} < ${self.config.trading.min_account_balance:.2f}")
             return False
         
-        # Check position limits
+        # Check position limits (reduce spam logging)
         if abs(market_data.open_positions) >= self.config.risk_management.max_position_size:
-            self.logger.warning(f"RISK BLOCK: Position limit reached: {market_data.open_positions} >= {self.config.risk_management.max_position_size}")
+            # Only log position limit occasionally to avoid spam
+            if not hasattr(self, '_last_position_warning') or (time.time() - getattr(self, '_last_position_warning', 0)) > 10:
+                self.logger.warning(f"RISK BLOCK: Position limit reached: {market_data.open_positions} >= {self.config.risk_management.max_position_size}")
+                self._last_position_warning = time.time()
             return False
         
         # Check daily loss limit
@@ -38,10 +42,7 @@ class RiskManager:
             self.logger.warning(f"RISK BLOCK: Volatility too high: {market_data.volatility:.4f} > 0.1000")
             return False
         
-        self.logger.debug(f"RISK PASSED: Balance=${market_data.account_balance:.2f}, "
-                         f"Positions={market_data.open_positions}, "
-                         f"Daily PnL=${market_data.daily_pnl:.2f}, "
-                         f"Volatility={market_data.volatility:.4f}")
+        # Risk check passed
         return True
     
     def needs_emergency_close(self, market_data: MarketData) -> bool:

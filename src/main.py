@@ -72,7 +72,8 @@ class TradingSystem:
             self.vol_carry, 
             self.vol_breakout,
             self.meta_allocator, 
-            self.execution_agent
+            self.execution_agent,
+            self.config
         )
         self.risk_manager = RiskManager(self.config)
         self.connection_manager = ConnectionManager(self.bridge, self.data_manager, self.price_history_manager)
@@ -80,7 +81,12 @@ class TradingSystem:
         # Setup bridge callbacks
         self.bridge.on_historical_data = self._on_historical_data
         self.bridge.on_market_data = self._on_market_data
+        self.bridge.on_realtime_tick = self._on_realtime_tick  # NEW: Real-time tick callback
         self.bridge.on_trade_completion = self._on_trade_completion
+        
+        # Real-time signal tracking
+        self.last_realtime_signal = None
+        self.last_realtime_signal_time = 0
     
     def start(self):
         """Start the trading system."""
@@ -143,26 +149,103 @@ class TradingSystem:
     
     def _on_market_data(self, market_data: MarketData):
         """Handle live market data from NinjaTrader."""
-        self.logger.info(f"Market Data: Price=${market_data.current_price:.2f}, "
-                        f"Balance=${market_data.account_balance:.2f}, "
-                        f"Positions={market_data.open_positions}, "
-                        f"Daily PnL=${market_data.daily_pnl:.2f}, "
-                        f"Volatility={market_data.volatility:.4f}")
+        # Market data received - essential values only
+        if market_data.open_positions != 0 or abs(market_data.daily_pnl) > 10:
+            self.logger.info(f"Price=${market_data.current_price:.2f} | Pos={market_data.open_positions} | PnL=${market_data.daily_pnl:.2f}")
         
         # Check if we should trade
         if not self.risk_manager.should_trade(market_data):
-            self.logger.debug("Risk manager rejected trading")
             return
         
         # Check for emergency close
         if self.risk_manager.needs_emergency_close(market_data):
             emergency_signal = self.risk_manager.create_emergency_signal()
             self.bridge.send_signal(emergency_signal)
-            self.logger.critical("EMERGENCY: CLOSE_ALL signal sent")
+            self.logger.critical("EMERGENCY CLOSE_ALL")
             return
         
         # Process signals
         self._process_trading_signals(market_data)
+    
+    def _on_realtime_tick(self, tick_data: dict):
+        """Handle real-time tick data for immediate decisions."""
+        current_price = tick_data.get('current_tick_price', 0.0)
+        timestamp = tick_data.get('timestamp', 0)
+        
+        # Tick received (debug logging disabled)
+        
+        # Create complete market data for strategy analysis
+        if self.bridge.latest_market_data:
+            # CRITICAL: Make a copy of the latest market data and update with tick info
+            import copy
+            realtime_market_data = copy.deepcopy(self.bridge.latest_market_data)
+            
+            # Update with real-time tick information  
+            realtime_market_data.current_price = current_price  # Update current price to tick price
+            realtime_market_data.current_tick_price = current_price
+            realtime_market_data.tick_timestamp = timestamp
+            realtime_market_data.tick_volume = tick_data.get('tick_volume', 0.0)
+            
+            # Update account information with real-time data
+            realtime_market_data.account_balance = tick_data.get('account_balance', realtime_market_data.account_balance)
+            realtime_market_data.daily_pnl = tick_data.get('daily_pnl', realtime_market_data.daily_pnl)
+            realtime_market_data.unrealized_pnl = tick_data.get('unrealized_pnl', realtime_market_data.unrealized_pnl)
+            realtime_market_data.open_positions = tick_data.get('open_positions', realtime_market_data.open_positions)
+            
+            # Price updated to real-time tick
+            
+            # Run strategies with complete data + real-time price
+            self._process_realtime_tick_signals(realtime_market_data, tick_data)
+    
+    def _process_realtime_tick_signals(self, market_data: MarketData, tick_data: dict):
+        """Process real-time tick signals for immediate execution."""
+        # Basic risk check first
+        if not self.risk_manager.should_trade(market_data):
+            return
+        
+        # Emergency close check (using tick data)
+        if self.risk_manager.needs_emergency_close(market_data):
+            emergency_signal = self.risk_manager.create_emergency_signal()
+            self.bridge.send_signal(emergency_signal)
+            self.logger.critical("EMERGENCY: CLOSE_ALL signal sent (real-time)")
+            return
+        
+        # Real-time strategy analysis
+        
+        try:
+            # Simple cooldown to prevent rapid-fire signals (5 second minimum)
+            import time
+            current_time = time.time()
+            if self.last_realtime_signal_time > 0 and (current_time - self.last_realtime_signal_time) < 5:
+                # Signal cooldown active
+                return
+            
+            # Run signal processor on real-time market data
+            trade_signal = self.signal_processor.process_market_data(market_data)
+            
+            if trade_signal:
+                # Get execution decision
+                execution_decision = self.signal_processor.get_execution_decision(trade_signal, market_data)
+                
+                # Execution decision made
+                
+                # Send signal IMMEDIATELY
+                success = self.bridge.send_signal(trade_signal)
+                if success:
+                    action_str = "BUY" if trade_signal.action == 1 else "SELL" if trade_signal.action == 2 else "CLOSE_ALL"
+                    self.logger.info(f"SIGNAL SENT: {action_str} {trade_signal.position_size}x @ {trade_signal.confidence:.2f}")
+                    
+                    # Update tracking for cooldown
+                    self.last_realtime_signal = trade_signal
+                    self.last_realtime_signal_time = current_time
+                else:
+                    self.logger.error("SIGNAL FAILED")
+            # No signal generated
+                
+        except Exception as e:
+            self.logger.error(f"Error processing real-time signals: {e}")
+        
+        # Real-time analysis complete
     
     def _on_trade_completion(self, trade_completion: TradeCompletion):
         """Handle trade completion from NinjaTrader."""
@@ -180,25 +263,16 @@ class TradingSystem:
                 # Get execution decision
                 execution_decision = self.signal_processor.get_execution_decision(trade_signal, market_data)
                 
-                if execution_decision:
-                    self.logger.info(f"Execution Decision: Order Type={execution_decision.order_type}, "
-                                   f"Urgency={execution_decision.urgency_score:.2f}")
-                else:
-                    self.logger.info("Execution Decision: Using default market order")
+                # Execution decision processed
                 
                 # Send signal
                 success = self.bridge.send_signal(trade_signal)
                 if success:
                     action_str = "BUY" if trade_signal.action == 1 else "SELL" if trade_signal.action == 2 else "CLOSE_ALL"
-                    self.logger.info(f"SIGNAL SENT: {action_str} {trade_signal.position_size} contracts @ confidence {trade_signal.confidence:.3f}")
-                    if trade_signal.use_stop:
-                        self.logger.info(f"Stop Loss: ${trade_signal.stop_price:.2f}")
-                    if trade_signal.use_target:
-                        self.logger.info(f"Target Price: ${trade_signal.target_price:.2f}")
+                    self.logger.info(f"SIGNAL: {action_str} {trade_signal.position_size}x @ {trade_signal.confidence:.2f}")
                 else:
-                    self.logger.error("FAILED to send signal to NinjaTrader")
-            else:
-                self.logger.debug("No trading signal generated")
+                    self.logger.error("SIGNAL FAILED")
+            # No signal generated
                     
         except Exception as e:
             self.logger.error(f"Error processing signals: {e}")

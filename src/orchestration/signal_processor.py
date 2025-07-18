@@ -13,89 +13,51 @@ from src.models.ppo_execution import PPOExecutionAgent, ExecutionDecision
 class SignalProcessor:
     """Processes signals from strategies and converts them to executable trades."""
     
-    def __init__(self, mean_reversion, momentum, vol_carry=None, vol_breakout=None, meta_allocator=None, execution_agent=None):
+    def __init__(self, mean_reversion, momentum, vol_carry=None, vol_breakout=None, meta_allocator=None, execution_agent=None, config=None):
         self.mean_reversion = mean_reversion
         self.momentum = momentum
         self.vol_carry = vol_carry
         self.vol_breakout = vol_breakout
         self.meta_allocator = meta_allocator
         self.execution_agent = execution_agent
+        self.config = config
         self.logger = logging.getLogger(__name__)
     
     def process_market_data(self, market_data: MarketData) -> Optional[TradeSignal]:
         """Process market data and generate trading signals."""
-        self.logger.info("=== Signal Processing Start ===")
+        # Processing signals
         
         # Generate signals from all strategies
         signals = {}
         
         # Mean Reversion Strategy
-        self.logger.info("Generating mean reversion signal...")
+        # Mean reversion
         mean_reversion_signal = self.mean_reversion.generate_signal(market_data)
         if mean_reversion_signal:
-            stop_str = f"${mean_reversion_signal.stop_price:.2f}" if mean_reversion_signal.stop_price else 'None'
-            target_str = f"${mean_reversion_signal.target_price:.2f}" if mean_reversion_signal.target_price else 'None'
-            self.logger.info(f"Mean Reversion Signal: Action={mean_reversion_signal.action}, "
-                           f"Confidence={mean_reversion_signal.confidence:.3f}, "
-                           f"Entry=${mean_reversion_signal.entry_price:.2f}, "
-                           f"Stop={stop_str}, Target={target_str}")
             signals['mean_reversion'] = mean_reversion_signal
-        else:
-            self.logger.info("Mean Reversion Signal: None")
         
-        # Momentum Strategy
-        self.logger.info("Generating momentum signal...")
+        # Momentum
         momentum_signal = self.momentum.generate_signal(market_data)
         if momentum_signal:
-            stop_str = f"${momentum_signal.stop_price:.2f}" if momentum_signal.stop_price else 'None'
-            target_str = f"${momentum_signal.target_price:.2f}" if momentum_signal.target_price else 'None'
-            self.logger.info(f"Momentum Signal: Action={momentum_signal.action}, "
-                           f"Confidence={momentum_signal.confidence:.3f}, "
-                           f"Entry=${momentum_signal.entry_price:.2f}, "
-                           f"Stop={stop_str}, Target={target_str}")
             signals['momentum'] = momentum_signal
-        else:
-            self.logger.info("Momentum Signal: None")
         
         # Volatility Carry Strategy (if available)
+        # Vol carry
         if self.vol_carry:
-            self.logger.info("Generating volatility carry signal...")
             vol_carry_signal = self.vol_carry.generate_signal(market_data)
             if vol_carry_signal:
-                stop_str = f"${vol_carry_signal.stop_price:.2f}" if vol_carry_signal.stop_price else 'None'
-                target_str = f"${vol_carry_signal.target_price:.2f}" if vol_carry_signal.target_price else 'None'
-                self.logger.info(f"Vol Carry Signal: Action={vol_carry_signal.action}, "
-                               f"Confidence={vol_carry_signal.confidence:.3f}, "
-                               f"Entry=${vol_carry_signal.entry_price:.2f}, "
-                               f"Stop={stop_str}, Target={target_str}")
                 signals['vol_carry'] = vol_carry_signal
-            else:
-                self.logger.info("Vol Carry Signal: None")
         
         # Volatility Breakout Strategy (if available)
+        # Vol breakout  
         if self.vol_breakout:
-            self.logger.info("Generating volatility breakout signal...")
             vol_breakout_signal = self.vol_breakout.generate_signal(market_data)
             if vol_breakout_signal:
-                stop_str = f"${vol_breakout_signal.stop_price:.2f}" if vol_breakout_signal.stop_price else 'None'
-                target_str = f"${vol_breakout_signal.target_price:.2f}" if vol_breakout_signal.target_price else 'None'
-                self.logger.info(f"Vol Breakout Signal: Action={vol_breakout_signal.action}, "
-                               f"Confidence={vol_breakout_signal.confidence:.3f}, "
-                               f"Entry=${vol_breakout_signal.entry_price:.2f}, "
-                               f"Stop={stop_str}, Target={target_str}")
                 signals['vol_breakout'] = vol_breakout_signal
-            else:
-                self.logger.info("Vol Breakout Signal: None")
         
         # Get allocation decision
         allocation = self._get_allocation_decision(market_data, signals)
-        if allocation:
-            self.logger.info(f"Meta Allocator: MR Weight={allocation.mean_reversion_weight:.2f}, "
-                           f"Momentum Weight={allocation.momentum_weight:.2f}, "
-                           f"Vol Carry Weight={allocation.vol_carry_weight:.2f}, "
-                           f"Vol Breakout Weight={allocation.vol_breakout_weight:.2f}")
-        else:
-            self.logger.info("Meta Allocator: Using equal weights")
+        # Meta allocation computed
         
         # Select best signal
         final_signal = self._select_final_signal(signals, allocation)
@@ -173,16 +135,43 @@ class SignalProcessor:
         return signal
     
     def get_execution_decision(self, trade_signal: TradeSignal, market_data: MarketData) -> Optional[ExecutionDecision]:
-        """Get execution decision from RL agent."""
+        """Get execution decision from RL agent or force market orders."""
+        # Check if market orders are forced
+        if self.config and self.config.trading.force_market_orders:
+            self.logger.info("FORCE_MARKET_ORDERS enabled - using market orders only")
+            return ExecutionDecision(
+                order_type="market",
+                limit_offset=0.0,
+                confidence=1.0,
+                expected_slippage=0.001,  # Small expected slippage for market orders
+                urgency_score=1.0
+            )
+        
+        # Use RL agent if available and not forced to market orders
         if not self.execution_agent:
-            return None
+            self.logger.info("No execution agent - defaulting to market orders")
+            return ExecutionDecision(
+                order_type="market",
+                limit_offset=0.0,
+                confidence=0.8,
+                expected_slippage=0.001,
+                urgency_score=0.8
+            )
         
         try:
             urgency = min(1.0, trade_signal.confidence + market_data.volatility)
-            return self.execution_agent.get_execution_decision(
+            decision = self.execution_agent.get_execution_decision(
                 market_data, trade_signal.position_size, urgency
             )
+            self.logger.info(f"RL execution decision: {decision.order_type}")
+            return decision
         except Exception as e:
-            self.logger.error(f"Error getting execution decision: {e}")
-            return None
+            self.logger.error(f"Error getting execution decision: {e} - defaulting to market order")
+            return ExecutionDecision(
+                order_type="market",
+                limit_offset=0.0,
+                confidence=0.5,
+                expected_slippage=0.001,
+                urgency_score=0.5
+            )
     

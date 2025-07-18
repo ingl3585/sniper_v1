@@ -40,8 +40,8 @@ class NetworkConfig:
 @dataclass
 class RiskManagementConfig:
     """Shared risk management configuration."""
-    max_position_size: int = 10
-    risk_per_trade: float = 0.20
+    max_position_size: int = 5
+    risk_per_trade: float = 0.25
     stop_loss_atr_multiplier: float = 2.0
     min_confidence: float = 0.6
 
@@ -77,12 +77,13 @@ class TechnicalAnalysisConfig:
 class TradingConfig:
     """Trading system configuration."""
     # Risk Management
-    max_daily_loss_pct: float = 0.5  # 50% daily loss limit
-    min_account_balance: float = 1000.0
+    max_daily_loss_pct: float = 0.5  # 95% daily loss limit
+    min_account_balance: float = 500.0
     
     # Strategy Settings
     enable_ml_allocator: bool = True
     enable_rl_execution: bool = True
+    force_market_orders: bool = True  # Force market orders for guaranteed fills
     
     # System Settings
     log_level: str = "INFO"
@@ -101,6 +102,7 @@ class TradingConfig:
             min_account_balance=float(os.getenv('MIN_ACCOUNT_BALANCE', defaults.min_account_balance)),
             enable_ml_allocator=os.getenv('ENABLE_ML_ALLOCATOR', str(defaults.enable_ml_allocator).lower()).lower() == 'true',
             enable_rl_execution=os.getenv('ENABLE_RL_EXECUTION', str(defaults.enable_rl_execution).lower()).lower() == 'true',
+            force_market_orders=os.getenv('FORCE_MARKET_ORDERS', str(defaults.force_market_orders).lower()).lower() == 'true',
             log_level=os.getenv('LOG_LEVEL', defaults.log_level),
             data_dir=os.getenv('DATA_DIR', defaults.data_dir),
             trading_blackout_start=int(os.getenv('TRADING_BLACKOUT_START', defaults.trading_blackout_start)),

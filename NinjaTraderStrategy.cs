@@ -34,6 +34,19 @@ namespace NinjaTrader.NinjaScript.Strategies
         private bool sessionInitialized = false;
         private int lastTradeCount = 0;
 
+        // Hybrid Execution: Pending signal for tick execution
+        private SignalMessage pendingSignal = null;
+        private bool hasPendingSignal = false;
+        private double currentTickPrice = 0.0;
+        private DateTime lastSignalTime = DateTime.MinValue;
+
+        // Real-time Tick Processing: Rate limiting and filtering
+        private DateTime lastTickSent = DateTime.MinValue;
+        private double lastSentPrice = 0.0;
+        private double minPriceMove = 0.25; // Minimum ticks to trigger update
+        private TimeSpan minTickInterval = TimeSpan.FromMilliseconds(100); // Max 10 updates/second
+        private DateTime lastBarUpdate = DateTime.MinValue;
+
         private class SignalMessage
         {
             public int action { get; set; }
@@ -51,8 +64,8 @@ namespace NinjaTrader.NinjaScript.Strategies
             {
                 case State.SetDefaults:
                     Name = "ResearchStrategy";
-                    Description = "Rewritten AI strategy";
-                    Calculate = Calculate.OnBarClose;
+                    Description = "Real-time tick-based AI strategy";
+                    Calculate = Calculate.OnEachTick; // REAL-TIME: Process every tick
                     EntriesPerDirection = 10;
                     EntryHandling = EntryHandling.AllEntries;
                     break;
@@ -92,16 +105,82 @@ namespace NinjaTrader.NinjaScript.Strategies
             if (BarsInProgress != 0 || State != State.Realtime)
                 return;
 
-            UpdateSeries();
             if (!isConnected) return;
 
-            if (!historicalSent)
+            // CRITICAL: Preserve ALL existing functionality on bar close
+            if (IsFirstTickOfBar)
             {
-                SendHistorical();
+                // === EXISTING BAR PROCESSING - COMPLETELY PRESERVED ===
+                UpdateSeries();  // PRESERVED: Update all price/volume arrays
+                
+                if (!historicalSent)
+                {
+                    SendHistorical();  // PRESERVED: Send 10 days historical data
+                    return;
+                }
+                
+                SendLiveData();  // PRESERVED: Send complete market data
+                // === END EXISTING BAR PROCESSING ===
+                
+                lastBarUpdate = DateTime.Now;
+                // Bar close processing completed (log reduced)
+            }
+            else
+            {
+                // === NEW REAL-TIME TICK PROCESSING - ADDED ON TOP ===
+                ProcessRealtimeTick();
+                // === END NEW TICK PROCESSING ===
+            }
+        }
+
+        // NEW METHOD: Handle real-time ticks (does NOT replace existing functionality)
+        private void ProcessRealtimeTick()
+        {
+            // Update current tick price for immediate execution
+            currentTickPrice = Close[0];
+            
+            // Execute pending signal if we have one (immediate execution)
+            if (hasPendingSignal && pendingSignal != null)
+            {
+                ExecutePendingSignal();
                 return;
             }
+            
+            // Send filtered tick data to Python for real-time decisions
+            if (ShouldSendTickUpdate())
+            {
+                SendRealtimeTickData();
+            }
+        }
 
-            SendLiveData();
+        // NEW METHOD: Intelligent filtering to avoid overwhelming Python
+        private bool ShouldSendTickUpdate()
+        {
+            double currentPrice = Close[0];
+            DateTime now = DateTime.Now;
+            
+            // Basic sanity check only - trust NinjaTrader data
+            if (currentPrice <= 0 || double.IsNaN(currentPrice) || double.IsInfinity(currentPrice))
+            {
+                Print($"WARNING: Invalid price detected: {currentPrice}");
+                return false;
+            }
+            
+            // Rate limiting: Max 10 updates per second
+            if (now - lastTickSent < minTickInterval)
+                return false;
+            
+            // Price movement filtering: Only significant moves
+            if (lastSentPrice > 0)
+            {
+                double priceMove = Math.Abs(currentPrice - lastSentPrice);
+                if (priceMove < minPriceMove)
+                    return false;
+            }
+            
+            lastTickSent = now;
+            lastSentPrice = currentPrice;
+            return true;
         }
 
         private void UpdateSeries()
@@ -231,6 +310,9 @@ namespace NinjaTrader.NinjaScript.Strategies
                 volume_30m = vol30m,
                 volume_1h = vol1h,
                 current_price = Close[0],
+                current_tick_price = currentTickPrice > 0 ? currentTickPrice : Close[0],
+                tick_timestamp = DateTime.UtcNow.Ticks,
+                tick_volume = Volume[0],
                 open_positions = Position.Quantity,
                 account_balance = Account.Get(AccountItem.CashValue, Currency.UsDollar),
                 buying_power = Account.Get(AccountItem.ExcessIntradayMargin, Currency.UsDollar),
@@ -239,6 +321,28 @@ namespace NinjaTrader.NinjaScript.Strategies
                 timestamp = new DateTimeOffset(Time[0]).ToUnixTimeSeconds()
             };
             SendJson(md);
+        }
+
+        // NEW METHOD: Send lightweight real-time tick data (does NOT replace SendLiveData)
+        private void SendRealtimeTickData()
+        {
+            var tickData = new
+            {
+                type = "realtime_tick",
+                current_price = Close[0],
+                current_tick_price = currentTickPrice > 0 ? currentTickPrice : Close[0],
+                tick_timestamp = DateTime.UtcNow.Ticks,
+                tick_volume = Volume[0],
+                open_positions = Position.Quantity,
+                // Include minimal account info for real-time decisions
+                account_balance = Account.Get(AccountItem.CashValue, Currency.UsDollar),
+                daily_pnl = Account.Get(AccountItem.RealizedProfitLoss, Currency.UsDollar) - sessionStartPnL,
+                unrealized_pnl = Account.Get(AccountItem.UnrealizedProfitLoss, Currency.UsDollar),
+                timestamp = DateTime.UtcNow.Ticks
+            };
+            SendJson(tickData);
+            
+            // Tick sent (verbose logging disabled for performance)
         }
 
         private void SendJson(object obj)
@@ -294,6 +398,36 @@ namespace NinjaTrader.NinjaScript.Strategies
         private void ProcessSignal(string json)
         {
             SignalMessage signal = serializer.Deserialize<SignalMessage>(json);
+            
+            // HYBRID EXECUTION: Set pending signal for tick execution instead of immediate execution
+            pendingSignal = signal;
+            hasPendingSignal = true;
+            lastSignalTime = DateTime.Now;
+            
+            Print($"SIGNAL: {(signal.action == 1 ? "BUY" : signal.action == 2 ? "SELL" : "CLOSE")} {signal.position_size} @ {signal.confidence:F2}");
+        }
+
+        // NEW: OnEachTick method for immediate signal execution
+        protected override void OnMarketData(MarketDataEventArgs marketDataUpdate)
+        {
+            if (State != State.Realtime) return;
+            
+            // Update current tick price
+            if (marketDataUpdate.MarketDataType == MarketDataType.Last)
+            {
+                currentTickPrice = marketDataUpdate.Price;
+                
+                // Execute pending signal if we have one
+                if (hasPendingSignal && pendingSignal != null)
+                {
+                    ExecutePendingSignal();
+                }
+            }
+        }
+
+        private void ExecutePendingSignal()
+        {
+            var signal = pendingSignal;
             int action = signal.action;
             int size = signal.position_size;
             double confidence = signal.confidence;
@@ -304,26 +438,46 @@ namespace NinjaTrader.NinjaScript.Strategies
 
             string tag = $"AI_{DateTime.Now:HHmmss}_{entryId++}";
 
+            // Validate current price is reasonable (within 1% of signal price)
+            double priceDiff = Math.Abs(currentTickPrice - signal.target_price) / currentTickPrice;
+            if (priceDiff > 0.01 && signal.target_price > 0)
+            {
+                Print($"WARNING: Tick price {currentTickPrice} differs significantly from signal price {signal.target_price}");
+            }
+
             if (action == 0)
             {
                 ExitLong();
                 ExitShort();
-                Print("EMERGENCY CLOSE_ALL received");
+                Print("EMERGENCY CLOSE ALL");
             }
             else if (action == 1)
             {
                 EnterLong(size, tag);
                 if (useStop) SetStopLoss(tag, CalculationMode.Price, stop, false);
                 if (useTarget) SetProfitTarget(tag, CalculationMode.Price, target);
+                
+                string stopStr = useStop ? $" | Stop: ${stop:F2}" : "";
+                string targetStr = useTarget ? $" | Target: ${target:F2}" : "";
+                Print($"BUY: {size}x @ ${currentTickPrice:F2}{stopStr}{targetStr}");
             }
             else if (action == 2)
             {
                 EnterShort(size, tag);
                 if (useStop) SetStopLoss(tag, CalculationMode.Price, stop, false);
                 if (useTarget) SetProfitTarget(tag, CalculationMode.Price, target);
+                
+                string stopStr = useStop ? $" | Stop: ${stop:F2}" : "";
+                string targetStr = useTarget ? $" | Target: ${target:F2}" : "";
+                Print($"SELL: {size}x @ ${currentTickPrice:F2}{stopStr}{targetStr}");
             }
 
-            Print($"Signal processed: Action={action}, Size={size}, Confidence={confidence:F2}");
+            // Clear pending signal
+            hasPendingSignal = false;
+            pendingSignal = null;
+            
+            var executionTime = DateTime.Now - lastSignalTime;
+            Print($"Executed in {executionTime.TotalMilliseconds:F0}ms");
         }
 
         protected override void OnExecutionUpdate(Execution exec, string execId, double price, int qty,

@@ -108,4 +108,3 @@ tmp/
 # NinjaTrader files (if any get copied over)
 *.cs.bak
 *.ninjazip
-*md

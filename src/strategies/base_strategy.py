@@ -222,14 +222,18 @@ class BaseStrategy(ABC):
             close_prev = prices[i-1]
             close_curr = prices[i]
             
-            # Estimate typical intrabar range as percentage of price movement
-            # This approximates the missing High/Low information
+            # MNQ-specific True Range approximation
             price_change = abs(close_curr - close_prev)
-            estimated_range = max(price_change, close_curr * 0.001)  # Minimum 0.1% range
             
-            # For more volatile moves, increase the range estimate
-            if price_change > close_prev * 0.01:  # > 1% move
-                estimated_range *= 1.5  # Increase range estimate for large moves
+            # Base intrabar range for MNQ (typically 0.05-0.15% of price)
+            base_range = close_curr * 0.0008  # 0.08% baseline
+            
+            # Gap component (inter-bar price change)
+            gap_component = price_change
+            
+            # True Range = max of gap and typical intrabar range
+            # Cap at reasonable levels for MNQ
+            estimated_range = min(max(base_range, gap_component), close_curr * 0.002)  # Cap at 0.2%
             
             true_ranges.append(estimated_range)
         

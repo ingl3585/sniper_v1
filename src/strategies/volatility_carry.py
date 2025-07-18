@@ -34,31 +34,31 @@ class VolatilityCarryStrategy(BaseStrategy):
             
             # Check if we have sufficient data
             if not self._has_sufficient_data():
-                self.logger.info("VolCarry: Insufficient data for analysis")
+                # Insufficient data for vol carry analysis
                 return None
             
             # Calculate term structure signals
             primary_signal = self._analyze_term_structure(market_data)
             if not primary_signal:
-                self.logger.info("VolCarry: No term structure signal generated")
+                # No vol carry signal
                 return None
             
             # Apply carry filters
             if not self._validate_carry_opportunity(primary_signal, market_data):
-                self.logger.info("VolCarry: Carry opportunity validation failed")
+                # Vol carry validation failed
                 return None
             
             # Apply risk management
             if not self.should_trade(market_data):
-                self.logger.info("VolCarry: Risk management blocked trade")
+                # Vol carry risk blocked
                 return None
             
             # Check confidence threshold
             if primary_signal.confidence < self.system_config.risk_management.min_confidence:
-                self.logger.info(f"VolCarry: Signal confidence {primary_signal.confidence:.3f} below minimum {self.system_config.risk_management.min_confidence}")
+                # Confidence below minimum
                 return None
                 
-            self.logger.info(f"VolCarry: Generated {['HOLD', 'BUY', 'SELL'][primary_signal.action]} signal with confidence {primary_signal.confidence:.3f}")
+            self.logger.info(f"VolCarry: {['HOLD', 'BUY', 'SELL'][primary_signal.action]} @ {primary_signal.confidence:.2f}")
             return primary_signal
             
         except Exception as e:
@@ -121,8 +121,24 @@ class VolatilityCarryStrategy(BaseStrategy):
                 signal_strength = min(overall_slope / self.config.contango_threshold, 2.0)
                 confidence = min(0.5 + signal_strength * 0.2, 0.9)
                 
-                # Calculate stop and target based on volatility
-                atr = self.calculate_atr_simple(market_data.price_15m[-20:]) if len(market_data.price_15m) >= 20 else current_price * 0.01
+                # Calculate stop and target using proper ATR with OHLC data
+                atr = self.price_history_manager.calculate_atr('15m', period=14, length=50)
+                if atr == 0.0:  # Fallback if no OHLC data available
+                    atr = self.calculate_atr_simple(market_data.price_15m[-20:]) if len(market_data.price_15m) >= 20 else current_price * 0.01
+                
+                # Debug ATR calculation
+                self.logger.info(f"VolCarry ATR Debug: ATR={atr:.2f}, Current=${current_price:.2f}")
+                
+                # Dynamic ATR validation and capping
+                min_atr = current_price * 0.001  # 0.1% of price (minimum)
+                max_atr = current_price * 0.0025  # 0.25% of price (maximum for MNQ)
+                reasonable_atr = current_price * 0.0015  # 0.15% of price (typical for MNQ)
+                
+                if atr < min_atr or atr > max_atr:
+                    original_atr = atr
+                    atr = reasonable_atr
+                    self.logger.warning(f"VolCarry: ATR out of range (${original_atr:.2f}), using ${atr:.2f} (0.15% of price)")
+                
                 stop_price = current_price + (atr * self.system_config.risk_management.stop_loss_atr_multiplier)
                 target_price = current_price - (atr * self.config.target_atr_multiplier)
                 
@@ -140,8 +156,24 @@ class VolatilityCarryStrategy(BaseStrategy):
                 signal_strength = min(abs(overall_slope) / self.config.backwardation_threshold, 2.0)
                 confidence = min(0.5 + signal_strength * 0.2, 0.9)
                 
-                # Calculate stop and target
-                atr = self.calculate_atr_simple(market_data.price_15m[-20:]) if len(market_data.price_15m) >= 20 else current_price * 0.01
+                # Calculate stop and target using proper ATR with OHLC data
+                atr = self.price_history_manager.calculate_atr('15m', period=14, length=50)
+                if atr == 0.0:  # Fallback if no OHLC data available
+                    atr = self.calculate_atr_simple(market_data.price_15m[-20:]) if len(market_data.price_15m) >= 20 else current_price * 0.01
+                
+                # Debug ATR calculation
+                self.logger.info(f"VolCarry ATR Debug: ATR={atr:.2f}, Current=${current_price:.2f}")
+                
+                # Dynamic ATR validation and capping
+                min_atr = current_price * 0.001  # 0.1% of price (minimum)
+                max_atr = current_price * 0.0025  # 0.25% of price (maximum for MNQ)
+                reasonable_atr = current_price * 0.0015  # 0.15% of price (typical for MNQ)
+                
+                if atr < min_atr or atr > max_atr:
+                    original_atr = atr
+                    atr = reasonable_atr
+                    self.logger.warning(f"VolCarry: ATR out of range (${original_atr:.2f}), using ${atr:.2f} (0.15% of price)")
+                
                 stop_price = current_price - (atr * self.system_config.risk_management.stop_loss_atr_multiplier)
                 target_price = current_price + (atr * self.config.target_atr_multiplier)
                 
@@ -154,13 +186,7 @@ class VolatilityCarryStrategy(BaseStrategy):
                     reason=f"Vol carry: Strong backwardation (slope={overall_slope:.3f})"
                 )
             
-            # Log term structure analysis
-            self.logger.info(f"VolCarry Term Structure Analysis:")
-            self.logger.info(f"  Short vol (5m): {short_vol:.4f}")
-            self.logger.info(f"  Medium vol (15m): {medium_vol:.4f}")
-            self.logger.info(f"  Long vol (1h): {long_vol:.4f}")
-            self.logger.info(f"  Overall slope: {overall_slope:.4f}")
-            self.logger.info(f"  Signal: {signal.action if signal else 'None'}")
+            # Term structure: slope={overall_slope:.3f}, signal={'BUY' if signal and signal.action==1 else 'SELL' if signal and signal.action==2 else 'None'}
             
             return signal
             

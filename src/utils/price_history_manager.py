@@ -15,20 +15,29 @@ class TimeframeData:
     """Data structure for a specific timeframe."""
     prices: deque
     volumes: deque
+    highs: deque
+    lows: deque
+    opens: deque
     max_length: int
     
     def __post_init__(self):
         """Initialize deques with maxlen for efficient memory usage."""
-        self.prices = deque(maxlen=self.max_length)
+        self.prices = deque(maxlen=self.max_length)  # closes
         self.volumes = deque(maxlen=self.max_length)
+        self.highs = deque(maxlen=self.max_length)
+        self.lows = deque(maxlen=self.max_length)
+        self.opens = deque(maxlen=self.max_length)
     
-    def add_data(self, price: float, volume: float):
-        """Add new price and volume data."""
-        self.prices.append(price)
+    def add_data(self, price: float, volume: float, high: float = None, low: float = None, open_price: float = None):
+        """Add new OHLCV data."""
+        self.prices.append(price)  # close
         self.volumes.append(volume)
+        self.highs.append(high if high is not None else price)
+        self.lows.append(low if low is not None else price)
+        self.opens.append(open_price if open_price is not None else price)
     
     def get_prices(self, length: Optional[int] = None) -> List[float]:
-        """Get price list, optionally limited to specific length."""
+        """Get price list (closes), optionally limited to specific length."""
         if length is None:
             return list(self.prices)
         return list(self.prices)[-length:] if length <= len(self.prices) else list(self.prices)
@@ -38,6 +47,24 @@ class TimeframeData:
         if length is None:
             return list(self.volumes)
         return list(self.volumes)[-length:] if length <= len(self.volumes) else list(self.volumes)
+    
+    def get_highs(self, length: Optional[int] = None) -> List[float]:
+        """Get high prices, optionally limited to specific length."""
+        if length is None:
+            return list(self.highs)
+        return list(self.highs)[-length:] if length <= len(self.highs) else list(self.highs)
+    
+    def get_lows(self, length: Optional[int] = None) -> List[float]:
+        """Get low prices, optionally limited to specific length."""
+        if length is None:
+            return list(self.lows)
+        return list(self.lows)[-length:] if length <= len(self.lows) else list(self.lows)
+    
+    def get_opens(self, length: Optional[int] = None) -> List[float]:
+        """Get opening prices, optionally limited to specific length."""
+        if length is None:
+            return list(self.opens)
+        return list(self.opens)[-length:] if length <= len(self.opens) else list(self.opens)
     
     def has_sufficient_data(self, min_length: int) -> bool:
         """Check if we have sufficient data for analysis."""
@@ -57,11 +84,11 @@ class PriceHistoryManager:
         # Define max lengths for each timeframe from config
         buffers = config.data_buffers
         self.timeframes = {
-            '1m': TimeframeData(deque(), deque(), buffers.buffer_1m),
-            '5m': TimeframeData(deque(), deque(), buffers.buffer_5m),
-            '15m': TimeframeData(deque(), deque(), buffers.buffer_15m),
-            '30m': TimeframeData(deque(), deque(), buffers.buffer_30m),
-            '1h': TimeframeData(deque(), deque(), buffers.buffer_1h)
+            '1m': TimeframeData(deque(), deque(), deque(), deque(), deque(), buffers.buffer_1m),
+            '5m': TimeframeData(deque(), deque(), deque(), deque(), deque(), buffers.buffer_5m),
+            '15m': TimeframeData(deque(), deque(), deque(), deque(), deque(), buffers.buffer_15m),
+            '30m': TimeframeData(deque(), deque(), deque(), deque(), deque(), buffers.buffer_30m),
+            '1h': TimeframeData(deque(), deque(), deque(), deque(), deque(), buffers.buffer_1h)
         }
         
         # Thread safety
@@ -135,6 +162,56 @@ class PriceHistoryManager:
             if timeframe not in self.timeframes:
                 return []
             return self.timeframes[timeframe].get_volumes(length)
+    
+    def get_highs(self, timeframe: str, length: Optional[int] = None) -> List[float]:
+        """Get high price data for a specific timeframe."""
+        with self._lock:
+            if timeframe not in self.timeframes:
+                return []
+            return self.timeframes[timeframe].get_highs(length)
+    
+    def get_lows(self, timeframe: str, length: Optional[int] = None) -> List[float]:
+        """Get low price data for a specific timeframe."""
+        with self._lock:
+            if timeframe not in self.timeframes:
+                return []
+            return self.timeframes[timeframe].get_lows(length)
+    
+    def get_opens(self, timeframe: str, length: Optional[int] = None) -> List[float]:
+        """Get opening price data for a specific timeframe."""
+        with self._lock:
+            if timeframe not in self.timeframes:
+                return []
+            return self.timeframes[timeframe].get_opens(length)
+    
+    def calculate_atr(self, timeframe: str, period: int = 14, length: Optional[int] = None) -> float:
+        """Calculate proper ATR using OHLC data: ATR = SMA(TR) where TR = max(H-L, |H-C₍ₜ₋₁₎|, |L-C₍ₜ₋₁₎|)"""
+        with self._lock:
+            if timeframe not in self.timeframes:
+                return 0.0
+            
+            highs = self.get_highs(timeframe, length)
+            lows = self.get_lows(timeframe, length)
+            closes = self.get_prices(timeframe, length)
+            
+            if len(highs) < 2 or len(lows) < 2 or len(closes) < 2:
+                return closes[-1] * 0.01 if closes else 0.01
+            
+            true_ranges = []
+            for i in range(1, min(len(highs), len(lows), len(closes))):
+                # True Range formula: TR = max(H-L, |H-C₍ₜ₋₁₎|, |L-C₍ₜ₋₁₎|)
+                high_low = highs[i] - lows[i]
+                high_prev_close = abs(highs[i] - closes[i-1])
+                low_prev_close = abs(lows[i] - closes[i-1])
+                
+                true_range = max(high_low, high_prev_close, low_prev_close)
+                true_ranges.append(true_range)
+            
+            # ATR = Simple Moving Average of True Range over specified period
+            if len(true_ranges) >= period:
+                return np.mean(true_ranges[-period:])
+            else:
+                return np.mean(true_ranges) if true_ranges else 0.0
     
     def has_sufficient_data(self, timeframe: str, min_length: int) -> bool:
         """Check if timeframe has sufficient data for analysis."""

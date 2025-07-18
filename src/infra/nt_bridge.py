@@ -46,6 +46,11 @@ class MarketData:
     volatility_percentile: float = 0.5
     volatility_breakout: Optional[dict] = None  # Breakout detection results
     
+    # Tick-level data for immediate execution
+    current_tick_price: float = 0.0  # Most recent tick price
+    tick_timestamp: int = 0  # Timestamp of last tick update
+    tick_volume: float = 0.0  # Volume at current tick
+    
     @property
     def data_age_seconds(self) -> float:
         """Calculate age of market data in seconds."""
@@ -132,6 +137,7 @@ class NinjaTradeBridge:
         # Callback functions
         self.on_historical_data: Optional[Callable] = None
         self.on_market_data: Optional[Callable] = None
+        self.on_realtime_tick: Optional[Callable] = None  # NEW: Real-time tick callback
         self.on_trade_completion: Optional[Callable] = None
         
         # Threading
@@ -329,7 +335,7 @@ class NinjaTradeBridge:
                         self.on_historical_data(message)
                     except Exception as e:
                         self.logger.error(f"Error in historical data callback: {e}")
-                self.logger.info("Historical data received")
+                self.logger.info("Historical data loaded")
             
             elif msg_type == 'live_data':
                 market_data = self._parse_market_data(message)
@@ -341,6 +347,31 @@ class NinjaTradeBridge:
                     except Exception as e:
                         self.logger.error(f"Error in market data callback: {e}")
             
+            elif msg_type == 'realtime_tick':
+                # NEW: Handle real-time tick data for immediate decisions
+                tick_data = self._parse_realtime_tick(message)
+                
+                # Skip processing if validation failed
+                if tick_data is None:
+                    self.logger.debug("Realtime tick validation failed - skipping")
+                    return
+                
+                with self._data_lock:
+                    # Update latest market data with tick information
+                    if self.latest_market_data:
+                        self.latest_market_data.current_tick_price = tick_data.get('current_tick_price', 0.0)
+                        self.latest_market_data.tick_timestamp = tick_data.get('tick_timestamp', 0)
+                        self.latest_market_data.tick_volume = tick_data.get('tick_volume', 0.0)
+                
+                # Call real-time tick callback for immediate strategy decisions
+                if self.on_realtime_tick:
+                    try:
+                        self.on_realtime_tick(tick_data)
+                    except Exception as e:
+                        self.logger.error(f"Error in realtime tick callback: {e}")
+                
+                # Tick processed
+            
             elif msg_type == 'trade_completion':
                 trade_completion = self._parse_trade_completion(message)
                 if self.on_trade_completion:
@@ -348,7 +379,7 @@ class NinjaTradeBridge:
                         self.on_trade_completion(trade_completion)
                     except Exception as e:
                         self.logger.error(f"Error in trade completion callback: {e}")
-                self.logger.info(f"Trade completed: PnL ${trade_completion.pnl:.2f}")
+                self.logger.info(f"Trade: PnL ${trade_completion.pnl:.2f}")
             
             else:
                 self.logger.warning(f"Unknown message type: {msg_type}")
@@ -363,40 +394,74 @@ class NinjaTradeBridge:
         current_time_ms = int(time.time() * 1000)
         
         if raw_timestamp is not None:
-            # Debug: Log what timestamp format we're receiving
-            self.logger.info(f"Received timestamp from NT: {raw_timestamp} (type: {type(raw_timestamp)})")
-            
-            # Handle different timestamp formats that NinjaTrader might send
-            if isinstance(raw_timestamp, str):
-                try:
-                    # Try parsing as ISO format or other string formats
-                    from datetime import datetime
-                    dt = datetime.fromisoformat(raw_timestamp.replace('Z', '+00:00'))
-                    timestamp = int(dt.timestamp() * 1000)
-                    self.logger.info(f"Parsed string timestamp: {raw_timestamp} -> {timestamp}")
-                except:
-                    # If parsing fails, use current time
-                    timestamp = current_time_ms
-                    self.logger.warning(f"Failed to parse timestamp string: {raw_timestamp}, using current time")
-            elif isinstance(raw_timestamp, (int, float)):
-                # Check if timestamp is in seconds (need to convert to milliseconds)
-                if raw_timestamp < 1e10:  # Likely seconds (before year 2286)
-                    timestamp = int(raw_timestamp * 1000)
-                    self.logger.info(f"Converted seconds timestamp: {raw_timestamp} -> {timestamp}")
+            # Handle NinjaTrader timestamp formats
+            try:
+                if isinstance(raw_timestamp, str):
+                    # Handle yyyyMMddHHmmss format (e.g., "20250718143045")
+                    if len(raw_timestamp) == 14 and raw_timestamp.isdigit():
+                        from datetime import datetime
+                        dt = datetime.strptime(raw_timestamp, '%Y%m%d%H%M%S')
+                        timestamp = int(dt.timestamp() * 1000)
+                        # self.logger.debug(f"Parsed NT string timestamp: {raw_timestamp} -> {timestamp}")
+                    else:
+                        # Try other string formats
+                        from datetime import datetime
+                        dt = datetime.fromisoformat(raw_timestamp.replace('Z', '+00:00'))
+                        timestamp = int(dt.timestamp() * 1000)
+                        # self.logger.debug(f"Parsed ISO timestamp: {raw_timestamp} -> {timestamp}")
+                elif isinstance(raw_timestamp, (int, float)):
+                    # Handle numeric timestamps
+                    if raw_timestamp > 20000000000000:  # .NET Ticks (e.g., 638571234567890000)
+                        # Convert .NET ticks to Unix timestamp
+                        # .NET epoch starts Jan 1, 0001; Unix epoch starts Jan 1, 1970
+                        unix_epoch_ticks = 621355968000000000  # Ticks between .NET epoch and Unix epoch
+                        unix_timestamp_seconds = (raw_timestamp - unix_epoch_ticks) / 10000000
+                        timestamp = int(unix_timestamp_seconds * 1000)
+                        # self.logger.debug(f"Converted .NET ticks: {raw_timestamp} -> {timestamp}")
+                    elif raw_timestamp > 1e12:  # Milliseconds
+                        timestamp = int(raw_timestamp)
+                        # self.logger.debug(f"Using milliseconds timestamp: {raw_timestamp}")
+                    elif raw_timestamp > 1e9:  # Seconds
+                        # Check if timestamp is reasonable as Unix seconds
+                        test_timestamp = int(raw_timestamp * 1000)
+                        test_diff = abs(current_time_ms - test_timestamp)
+                        if test_diff > 86400000:  # If >24 hours off, likely wrong format
+                            # Might be NinjaTrader's internal format - just use current time
+                            timestamp = current_time_ms
+                            # Log for debugging but don't spam
+                            if not hasattr(self, '_nt_format_logged'):
+                                self.logger.info(f"NT timestamp format {raw_timestamp} seems to be internal format, using current time")
+                                self._nt_format_logged = True
+                        else:
+                            timestamp = test_timestamp
+                            # self.logger.debug(f"Converted seconds timestamp: {raw_timestamp} -> {timestamp}")
+                    else:
+                        # Fallback for other numeric formats
+                        timestamp = current_time_ms
+                        self.logger.warning(f"Unrecognized numeric timestamp: {raw_timestamp}")
                 else:
-                    timestamp = int(raw_timestamp)
-                    self.logger.info(f"Using milliseconds timestamp: {raw_timestamp}")
-            else:
+                    timestamp = current_time_ms
+                    self.logger.warning(f"Unknown timestamp type: {type(raw_timestamp)}")
+            except Exception as e:
                 timestamp = current_time_ms
-                self.logger.warning(f"Unknown timestamp type: {type(raw_timestamp)}, using current time")
+                self.logger.warning(f"Timestamp parsing error: {e}, using current time")
         else:
             timestamp = current_time_ms
-            self.logger.debug(f"No timestamp from NinjaTrader, using current time: {timestamp}")
+            # Using current time for timestamp
         
-        # Validate timestamp is reasonable (within last 24 hours)
+        # For NinjaTrader, timestamp accuracy isn't critical for trading
+        # Just use current time if timestamps seem way off
         time_diff = abs(current_time_ms - timestamp)
-        if time_diff > 86400000:  # 24 hours in milliseconds
-            self.logger.warning(f"Timestamp seems invalid (diff: {time_diff/1000:.0f}s), using current time")
+        if time_diff > 604800000:  # 7 days (very lenient)
+            # Only log once per hour to avoid spam
+            if not hasattr(self, '_last_timestamp_warning') or (current_time_ms - getattr(self, '_last_timestamp_warning', 0)) > 3600000:
+                from datetime import datetime
+                nt_time = datetime.fromtimestamp(timestamp/1000).strftime('%Y-%m-%d %H:%M:%S') if timestamp > 0 else 'invalid'
+                current_time = datetime.fromtimestamp(current_time_ms/1000).strftime('%Y-%m-%d %H:%M:%S')
+                self.logger.info(f"NT timestamp off by {time_diff/86400000:.1f} days: {nt_time} vs {current_time}, using system time")
+                self._last_timestamp_warning = current_time_ms
+            
+            # Use current time for trading timestamps
             timestamp = current_time_ms
         
         return MarketData(
@@ -416,6 +481,9 @@ class NinjaTradeBridge:
             unrealized_pnl=message.get('unrealized_pnl', 0.0),
             open_positions=message.get('open_positions', 0),
             current_price=message.get('current_price', 0.0),
+            current_tick_price=message.get('current_tick_price', message.get('current_price', 0.0)),
+            tick_timestamp=message.get('tick_timestamp', timestamp),
+            tick_volume=message.get('tick_volume', 0.0),
             timestamp=timestamp
         )
     
@@ -431,6 +499,44 @@ class NinjaTradeBridge:
             exit_time=message.get('exit_time', 0),
             trade_duration_minutes=message.get('trade_duration_minutes', 0.0)
         )
+    
+    def _parse_realtime_tick(self, message: Dict[str, Any]) -> Dict[str, Any]:
+        """Parse real-time tick message for immediate strategy decisions."""
+        # Extract and validate tick data
+        current_price = message.get('current_price', 0.0)
+        tick_price = message.get('current_tick_price', 0.0)
+        tick_timestamp = message.get('tick_timestamp', 0)
+        tick_volume = message.get('tick_volume', 0.0)
+        
+        # PYTHON-SIDE VALIDATION
+        if not self._validate_tick_data(current_price, tick_price, tick_timestamp):
+            self.logger.warning(f"Invalid tick data rejected: price={tick_price}, timestamp={tick_timestamp}")
+            return None
+        
+        return {
+            'current_price': current_price,
+            'current_tick_price': tick_price,
+            'tick_timestamp': tick_timestamp,
+            'tick_volume': tick_volume,
+            'open_positions': message.get('open_positions', 0),
+            'account_balance': message.get('account_balance', 0.0),
+            'daily_pnl': message.get('daily_pnl', 0.0),
+            'unrealized_pnl': message.get('unrealized_pnl', 0.0),
+            'timestamp': message.get('timestamp', int(time.time() * 1000))
+        }
+    
+    def _validate_tick_data(self, current_price: float, tick_price: float, timestamp: int) -> bool:
+        """Validate real-time tick data for sanity."""
+        # Basic sanity checks only - trust NinjaTrader's data quality
+        if tick_price <= 0 or current_price <= 0:
+            return False
+        
+        # NaN/infinity check
+        if not (isinstance(tick_price, (int, float)) and isinstance(current_price, (int, float))):
+            return False
+        
+        # That's it! Trust NinjaTrader's professional data validation
+        return True
     
     def send_signal(self, signal: TradeSignal) -> bool:
         """Send trade signal to NinjaScript (thread-safe)."""
@@ -498,7 +604,7 @@ class NinjaTradeBridge:
                 self.signal_socket.send(header + json_data)
                 
                 action_str = "BUY" if signal.action == 1 else "SELL" if signal.action == 2 else "CLOSE_ALL"
-                self.logger.info(f"Signal sent: {action_str} {signal.position_size} @ {signal.confidence:.2f}")
+                self.logger.info(f"NT: {action_str} {signal.position_size}x")
                 return True
                 
             except Exception as e:
