@@ -14,9 +14,9 @@ from src.config import MeanReversionConfig
 class MeanReversionStrategy(BaseStrategy):
     """Mean reversion strategy based on VWAP deviation."""
     
-    def __init__(self, config: MeanReversionConfig, price_history_manager=None):
+    def __init__(self, config: MeanReversionConfig, system_config, price_history_manager=None):
         
-        super().__init__("MeanReversion", config, price_history_manager)
+        super().__init__("MeanReversion", config, system_config, price_history_manager)
         self.config: MeanReversionConfig = config
         self.logger = logging.getLogger(__name__)
         self.vwap_history = []
@@ -134,10 +134,10 @@ class MeanReversionStrategy(BaseStrategy):
         z_score = current_deviation / std_dev
         
         # Calculate RSI for additional confirmation (configurable period)
-        rsi = self.calculate_rsi(prices, period=self.config.rsi_period, debug=self.config.rsi_debug_logging)
+        rsi = self.calculate_rsi(prices, period=self.system_config.technical_analysis.rsi_period, debug=self.config.rsi_debug_logging)
         
         # Calculate ATR for stop loss
-        atr_period = min(self.config.atr_lookback, len(prices))
+        atr_period = min(self.system_config.technical_analysis.atr_period, len(prices))
         atr = self.calculate_atr_simple(prices[-atr_period:])
         
         # Log all calculated values with detailed breakdown
@@ -163,7 +163,7 @@ class MeanReversionStrategy(BaseStrategy):
         # RSI detailed calculation logging for validation
         self.logger.info(f"RSI Calculation Details:")
         smoothing_method = "Wilder's exponential smoothing" if self.config.rsi_use_wilder_smoothing else "Simple average"
-        self.logger.info(f"RSI Period: {self.config.rsi_period} bars ({smoothing_method})")
+        self.logger.info(f"RSI Period: {self.system_config.technical_analysis.rsi_period} bars ({smoothing_method})")
         self.logger.info(f"RSI Price Range: ${min(prices):.2f} - ${max(prices):.2f}")
         
         # Add detailed RSI debugging for troubleshooting
@@ -203,7 +203,7 @@ class MeanReversionStrategy(BaseStrategy):
         if (z_score < -self.config.deviation_threshold and 
             rsi < self.config.rsi_oversold):
             
-            stop_price = current_price - (atr * self.config.stop_loss_atr_multiplier)
+            stop_price = current_price - (atr * self.system_config.risk_management.stop_loss_atr_multiplier)
             target_price = vwap  # Target is VWAP re-touch
             
             # Scale confidence based on how much z-score exceeds threshold
@@ -233,7 +233,7 @@ class MeanReversionStrategy(BaseStrategy):
         elif (z_score > self.config.deviation_threshold and 
               rsi > self.config.rsi_overbought):
             
-            stop_price = current_price + (atr * self.config.stop_loss_atr_multiplier)
+            stop_price = current_price + (atr * self.system_config.risk_management.stop_loss_atr_multiplier)
             target_price = vwap  # Target is VWAP re-touch
             
             # Scale confidence based on how much z-score exceeds threshold
@@ -297,7 +297,7 @@ class MeanReversionStrategy(BaseStrategy):
         z_score = current_deviation / std_dev
         
         # Calculate RSI for additional confirmation (configurable period)
-        rsi = self.calculate_rsi(prices, period=self.config.rsi_period, debug=self.config.rsi_debug_logging)
+        rsi = self.calculate_rsi(prices, period=self.system_config.technical_analysis.rsi_period, debug=self.config.rsi_debug_logging)
         
         # Log 1m confirmation analysis
         self.logger.info(f"=== {timeframe} Confirmation Analysis ===")
@@ -315,7 +315,7 @@ class MeanReversionStrategy(BaseStrategy):
             self.logger.info(f"Last 4 changes: {[f'{d:+.2f}' for d in deltas]}")
         
         smoothing_method = "Wilder's" if self.config.rsi_use_wilder_smoothing else "Simple"
-        self.logger.info(f"Calculated 1m RSI: {rsi:.2f} ({self.config.rsi_period}-period {smoothing_method})")
+        self.logger.info(f"Calculated 1m RSI: {rsi:.2f} ({self.system_config.technical_analysis.rsi_period}-period {smoothing_method})")
         
         # Signal quality scoring for 1m
         quality_score = self._calculate_1m_signal_quality(prices, volumes, z_score, rsi)
@@ -396,8 +396,8 @@ class MeanReversionStrategy(BaseStrategy):
             return None
         
         # Check if signal meets minimum confidence threshold
-        if primary_signal.confidence < self.config.min_confidence:
-            self.logger.info(f"Primary signal confidence {primary_signal.confidence:.3f} below minimum {self.config.min_confidence}")
+        if primary_signal.confidence < self.system_config.risk_management.min_confidence:
+            self.logger.info(f"Primary signal confidence {primary_signal.confidence:.3f} below minimum {self.system_config.risk_management.min_confidence}")
             return None
         
         # Check rate limiting

@@ -31,13 +31,14 @@ class Signal:
 class BaseStrategy(ABC):
     """Abstract base class for all trading strategies."""
     
-    def __init__(self, name: str, config, price_history_manager: PriceHistoryManager = None):
+    def __init__(self, name: str, strategy_config, system_config, price_history_manager: PriceHistoryManager = None):
         self.name = name
-        self.config = config
+        self.config = strategy_config  # Strategy-specific config (MeanReversionConfig, etc.)
+        self.system_config = system_config  # Full SystemConfig for shared settings
         self.position_size = 0
         self.last_signal_time = None
         self.atr_values = []
-        self.price_history_manager = price_history_manager or PriceHistoryManager()
+        self.price_history_manager = price_history_manager or PriceHistoryManager(system_config)
         
     @abstractmethod
     def generate_signal(self, market_data: MarketData) -> Optional[Signal]:
@@ -268,11 +269,11 @@ class BaseStrategy(ABC):
         risk_per_share = abs(current_price - stop_price)
         
         # Calculate position size based on risk
-        risk_amount = market_data.account_balance * self.config.risk_per_trade
+        risk_amount = market_data.account_balance * self.system_config.risk_management.risk_per_trade
         position_size = int(risk_amount / risk_per_share)
         
         # Apply position limits
-        max_size = min(self.config.max_position_size, 
+        max_size = min(self.system_config.risk_management.max_position_size, 
                       int(market_data.buying_power / (current_price * 100)))
         
         return max(1, min(position_size, max_size))
@@ -289,7 +290,7 @@ class BaseStrategy(ABC):
             return False
         
         # Check position limits
-        if abs(market_data.open_positions) >= self.config.max_position_size:
+        if abs(market_data.open_positions) >= self.system_config.risk_management.max_position_size:
             return False
         
         # Check volatility (avoid trading in extreme conditions)

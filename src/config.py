@@ -8,15 +8,68 @@ from typing import Optional
 
 
 @dataclass
-class TradingConfig:
-    """Trading system configuration."""
-    # TCP Connection
+class DataBufferConfig:
+    """Data buffer sizes for different timeframes."""
+    buffer_1m: int = 6000    # ~100 hours
+    buffer_5m: int = 1200    # ~4.2 days
+    buffer_15m: int = 400    # ~4.2 days
+    buffer_30m: int = 200    # ~4.2 days  
+    buffer_1h: int = 100     # ~4.2 days
+
+
+
+@dataclass
+class NetworkConfig:
+    """Network and connection settings."""
+    host: str = "localhost"
     data_port: int = 5556
     signal_port: int = 5557
+    max_reconnect_attempts: int = 10
+    reconnect_delay: float = 5.0
+    connection_timeout: float = 60.0
+    signal_timeout: float = 1.0
+    max_message_size: int = 10 * 1024 * 1024  # 10MB
     
+    # Data validation thresholds
+    stale_data_threshold: int = 300    # 5 minutes
+    aging_data_threshold: int = 120    # 2 minutes
+    fresh_data_threshold: int = 60     # 1 minute
+    timestamp_epoch_threshold: int = 1_000_000_000  # year 2001 cutoff
+
+
+@dataclass
+class RiskManagementConfig:
+    """Shared risk management configuration."""
+    max_position_size: int = 10
+    risk_per_trade: float = 0.20
+    stop_loss_atr_multiplier: float = 2.0
+    min_confidence: float = 0.6
+
+
+@dataclass
+class TechnicalAnalysisConfig:
+    """Technical analysis default parameters."""
+    rsi_period: int = 14
+    bollinger_period: int = 20
+    volatility_period: int = 20
+    atr_period: int = 10
+    lookback_bars: int = 20
+    default_volatility: float = 0.02
+    rsi_neutral: float = 50.0
+    
+    # Financial constants
+    annualization_factor: int = 1440  # minutes per trading day
+    position_size_divisor: int = 100
+    volume_normalization_1k: float = 1000.0
+    volume_normalization_5k: float = 5000.0
+    percentage_multiplier: int = 100
+
+
+@dataclass
+class TradingConfig:
+    """Trading system configuration."""
     # Risk Management
     max_daily_loss_pct: float = 0.5  # 50% daily loss limit
-    max_position_size: int = 10
     min_account_balance: float = 1000.0
     
     # Strategy Settings
@@ -36,10 +89,7 @@ class TradingConfig:
         """Create config from environment variables."""
         defaults = cls()
         return cls(
-            data_port=int(os.getenv('DATA_PORT', defaults.data_port)),
-            signal_port=int(os.getenv('SIGNAL_PORT', defaults.signal_port)),
             max_daily_loss_pct=float(os.getenv('MAX_DAILY_LOSS_PCT', defaults.max_daily_loss_pct)),
-            max_position_size=int(os.getenv('MAX_POSITION_SIZE', defaults.max_position_size)),
             min_account_balance=float(os.getenv('MIN_ACCOUNT_BALANCE', defaults.min_account_balance)),
             enable_ml_allocator=os.getenv('ENABLE_ML_ALLOCATOR', str(defaults.enable_ml_allocator).lower()).lower() == 'true',
             enable_rl_execution=os.getenv('ENABLE_RL_EXECUTION', str(defaults.enable_rl_execution).lower()).lower() == 'true',
@@ -53,12 +103,6 @@ class TradingConfig:
 @dataclass
 class MeanReversionConfig:
     """Mean reversion strategy configuration."""
-    # Risk Management
-    max_position_size: int = 10
-    risk_per_trade: float = 0.02
-    atr_lookback: int = 10
-    stop_loss_atr_multiplier: float = 2.0
-    min_confidence: float = 0.6
     
     # Strategy Parameters
     vwap_period: int = 20
@@ -78,8 +122,7 @@ class MeanReversionConfig:
     max_trades_per_hour: int = 6         # Rate limiting for 1m-triggered trades
     min_time_between_trades_minutes: int = 5  # Minimum gap between 1m signals
     
-    # RSI Calculation Settings
-    rsi_period: int = 14                 # Standard RSI period
+    # RSI Calculation Settings (uses TechnicalAnalysisConfig.rsi_period)
     rsi_use_wilder_smoothing: bool = True  # Use Wilder's exponential smoothing (standard)
     rsi_debug_logging: bool = False      # Enable detailed RSI calculation logging
 
@@ -87,12 +130,6 @@ class MeanReversionConfig:
 @dataclass
 class MomentumConfig:
     """Momentum strategy configuration."""
-    # Risk Management
-    max_position_size: int = 10
-    risk_per_trade: float = 0.02
-    atr_lookback: int = 10
-    stop_loss_atr_multiplier: float = 2.0
-    min_confidence: float = 0.6
     
     # Strategy Parameters
     fast_ema_period: int = 20
@@ -129,6 +166,10 @@ class PPOExecutionConfig:
 class SystemConfig:
     """Complete system configuration."""
     trading: TradingConfig
+    network: NetworkConfig
+    data_buffers: DataBufferConfig
+    technical_analysis: TechnicalAnalysisConfig
+    risk_management: RiskManagementConfig
     mean_reversion: MeanReversionConfig
     momentum: MomentumConfig
     meta_allocator: MetaAllocatorConfig
@@ -139,6 +180,10 @@ class SystemConfig:
         """Create default system configuration."""
         return cls(
             trading=TradingConfig(),
+            network=NetworkConfig(),
+            data_buffers=DataBufferConfig(),
+            technical_analysis=TechnicalAnalysisConfig(),
+            risk_management=RiskManagementConfig(),
             mean_reversion=MeanReversionConfig(),
             momentum=MomentumConfig(),
             meta_allocator=MetaAllocatorConfig(),
@@ -150,8 +195,13 @@ class SystemConfig:
         """Create system configuration from environment variables."""
         return cls(
             trading=TradingConfig.from_env(),
+            network=NetworkConfig(),
+            data_buffers=DataBufferConfig(),
+            technical_analysis=TechnicalAnalysisConfig(),
+            risk_management=RiskManagementConfig(),
             mean_reversion=MeanReversionConfig(),
             momentum=MomentumConfig(),
             meta_allocator=MetaAllocatorConfig(),
             ppo_execution=PPOExecutionConfig()
         )
+    

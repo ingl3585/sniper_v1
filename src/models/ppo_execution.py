@@ -18,6 +18,8 @@ from datetime import datetime
 from src.infra.nt_bridge import MarketData, TradeSignal
 
 
+from dataclasses import dataclass
+
 @dataclass
 class ExecutionDecision:
     """Execution decision from RL agent."""

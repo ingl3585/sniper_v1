@@ -15,9 +15,9 @@ from src.infra.nt_bridge import TradeSignal
 class MomentumStrategy(BaseStrategy):
     """Momentum strategy based on EMA crossovers and trend strength."""
     
-    def __init__(self, config: MomentumConfig, price_history_manager=None):
+    def __init__(self, config: MomentumConfig, system_config, price_history_manager=None):
         
-        super().__init__("Momentum", config, price_history_manager)
+        super().__init__("Momentum", config, system_config, price_history_manager)
         self.config: MomentumConfig = config
         self.logger = logging.getLogger(__name__)
         self.trend_direction = 0  # 1=up, -1=down, 0=neutral
@@ -112,7 +112,7 @@ class MomentumStrategy(BaseStrategy):
         self._update_trend_tracking(fast_ema, slow_ema, trend_strength)
         
         # Calculate ATR for stop loss
-        atr_period = min(self.config.atr_lookback, len(prices))
+        atr_period = min(self.system_config.technical_analysis.atr_period, len(prices))
         atr = self.calculate_atr_simple(prices[-atr_period:])
         
         # Log all calculated values with detailed breakdown
@@ -343,7 +343,7 @@ class MomentumStrategy(BaseStrategy):
             return None
         
         # Check if signal meets minimum confidence threshold
-        if primary_signal.confidence < self.config.min_confidence:
+        if primary_signal.confidence < self.system_config.risk_management.min_confidence:
             return None
         
         # Boost confidence if both timeframes agree

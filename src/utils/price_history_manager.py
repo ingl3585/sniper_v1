@@ -46,15 +46,21 @@ class TimeframeData:
 class PriceHistoryManager:
     """Centralized manager for price history across all timeframes."""
     
-    def __init__(self):
+    def __init__(self, config=None):
         """Initialize the price history manager."""
-        # Define max lengths for each timeframe (optimized for memory)
+        from src.config import SystemConfig
+        
+        if config is None:
+            config = SystemConfig.default()
+        
+        # Define max lengths for each timeframe from config
+        buffers = config.data_buffers
         self.timeframes = {
-            '1m': TimeframeData(deque(), deque(), 1000),   # ~16.7 hours
-            '5m': TimeframeData(deque(), deque(), 500),    # ~1.7 days  
-            '15m': TimeframeData(deque(), deque(), 300),   # ~3.1 days
-            '30m': TimeframeData(deque(), deque(), 150),   # ~3.1 days
-            '1h': TimeframeData(deque(), deque(), 100)     # ~4.2 days
+            '1m': TimeframeData(deque(), deque(), buffers.buffer_1m),
+            '5m': TimeframeData(deque(), deque(), buffers.buffer_5m),
+            '15m': TimeframeData(deque(), deque(), buffers.buffer_15m),
+            '30m': TimeframeData(deque(), deque(), buffers.buffer_30m),
+            '1h': TimeframeData(deque(), deque(), buffers.buffer_1h)
         }
         
         # Thread safety

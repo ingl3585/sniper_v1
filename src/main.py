@@ -49,13 +49,13 @@ class TradingSystem:
     def _initialize_components(self):
         """Initialize all system components."""
         # Core infrastructure
-        self.bridge = NinjaTradeBridge(self.config.trading.data_port, self.config.trading.signal_port)
+        self.bridge = NinjaTradeBridge(self.config)
         self.data_manager = DataManager(self.config.trading.data_dir)
-        self.price_history_manager = PriceHistoryManager()
+        self.price_history_manager = PriceHistoryManager(self.config)
         
         # Trading strategies
-        self.mean_reversion = MeanReversionStrategy(self.config.mean_reversion, self.price_history_manager)
-        self.momentum = MomentumStrategy(self.config.momentum, self.price_history_manager)
+        self.mean_reversion = MeanReversionStrategy(self.config.mean_reversion, self.config, self.price_history_manager)
+        self.momentum = MomentumStrategy(self.config.momentum, self.config, self.price_history_manager)
         
         # ML components
         self.meta_allocator = MetaAllocator(self.config.meta_allocator.model_path, self.config.meta_allocator) if self.config.trading.enable_ml_allocator else None
@@ -171,7 +171,7 @@ class TradingSystem:
                 
                 if execution_decision:
                     self.logger.info(f"Execution Decision: Order Type={execution_decision.order_type}, "
-                                   f"Urgency={execution_decision.urgency:.2f}")
+                                   f"Urgency={execution_decision.urgency_score:.2f}")
                 else:
                     self.logger.info("Execution Decision: Using default market order")
                 

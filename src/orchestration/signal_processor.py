@@ -28,22 +28,24 @@ class SignalProcessor:
         self.logger.info("Generating mean reversion signal...")
         mean_reversion_signal = self.mean_reversion.generate_signal(market_data)
         if mean_reversion_signal:
+            stop_str = f"${mean_reversion_signal.stop_price:.2f}" if mean_reversion_signal.stop_price else 'None'
+            target_str = f"${mean_reversion_signal.target_price:.2f}" if mean_reversion_signal.target_price else 'None'
             self.logger.info(f"Mean Reversion Signal: Action={mean_reversion_signal.action}, "
                            f"Confidence={mean_reversion_signal.confidence:.3f}, "
                            f"Entry=${mean_reversion_signal.entry_price:.2f}, "
-                           f"Stop=${mean_reversion_signal.stop_price:.2f if mean_reversion_signal.stop_price else 'None'}, "
-                           f"Target=${mean_reversion_signal.target_price:.2f if mean_reversion_signal.target_price else 'None'}")
+                           f"Stop={stop_str}, Target={target_str}")
         else:
             self.logger.info("Mean Reversion Signal: None")
         
         self.logger.info("Generating momentum signal...")
         momentum_signal = self.momentum.generate_signal(market_data)
         if momentum_signal:
+            stop_str = f"${momentum_signal.stop_price:.2f}" if momentum_signal.stop_price else 'None'
+            target_str = f"${momentum_signal.target_price:.2f}" if momentum_signal.target_price else 'None'
             self.logger.info(f"Momentum Signal: Action={momentum_signal.action}, "
                            f"Confidence={momentum_signal.confidence:.3f}, "
                            f"Entry=${momentum_signal.entry_price:.2f}, "
-                           f"Stop=${momentum_signal.stop_price:.2f if momentum_signal.stop_price else 'None'}, "
-                           f"Target=${momentum_signal.target_price:.2f if momentum_signal.target_price else 'None'}")
+                           f"Stop={stop_str}, Target={target_str}")
         else:
             self.logger.info("Momentum Signal: None")
         

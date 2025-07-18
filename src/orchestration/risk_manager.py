@@ -23,8 +23,8 @@ class RiskManager:
             return False
         
         # Check position limits
-        if abs(market_data.open_positions) >= self.config.trading.max_position_size:
-            self.logger.warning(f"RISK BLOCK: Position limit reached: {market_data.open_positions} >= {self.config.trading.max_position_size}")
+        if abs(market_data.open_positions) >= self.config.risk_management.max_position_size:
+            self.logger.warning(f"RISK BLOCK: Position limit reached: {market_data.open_positions} >= {self.config.risk_management.max_position_size}")
             return False
         
         # Check daily loss limit

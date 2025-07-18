@@ -102,9 +102,17 @@ class TradeCompletion:
 class NinjaTradeBridge:
     """TCP bridge for communication with NinjaScript strategy."""
     
-    def __init__(self, data_port: int = 5556, signal_port: int = 5557):
-        self.data_port = data_port
-        self.signal_port = signal_port
+    def __init__(self, config=None):
+        from src.config import SystemConfig
+        
+        if config is None:
+            config = SystemConfig.default()
+        
+        # Network configuration
+        self.network_config = config.network
+        self.data_port = self.network_config.data_port
+        self.signal_port = self.network_config.signal_port
+        
         self.data_socket: Optional[socket.socket] = None
         self.signal_socket: Optional[socket.socket] = None
         self.is_running = False
@@ -124,10 +132,10 @@ class NinjaTradeBridge:
         self._data_lock = threading.RLock()
         self._signal_lock = threading.RLock()
         
-        # Error recovery
-        self.max_reconnect_attempts = 10
-        self.reconnect_delay = 5.0
-        self.connection_timeout = 30.0
+        # Error recovery from config
+        self.max_reconnect_attempts = self.network_config.max_reconnect_attempts
+        self.reconnect_delay = self.network_config.reconnect_delay
+        self.connection_timeout = self.network_config.connection_timeout
         
         # Signal queue for thread-safe signal sending
         self.signal_queue = Queue()
@@ -418,7 +426,7 @@ class NinjaTradeBridge:
         """Send trade signal to NinjaScript (thread-safe)."""
         try:
             # Add signal to queue for processing by signal thread
-            self.signal_queue.put(signal, timeout=1.0)
+            self.signal_queue.put(signal, timeout=self.network_config.signal_timeout)
             return True
         except Exception as e:
             self.logger.error(f"Failed to queue signal: {e}")
@@ -429,7 +437,7 @@ class NinjaTradeBridge:
         while self.is_running:
             try:
                 # Get signal from queue with timeout
-                signal = self.signal_queue.get(timeout=1.0)
+                signal = self.signal_queue.get(timeout=self.network_config.signal_timeout)
                 
                 # Send the signal
                 success = self._send_signal_direct(signal)
