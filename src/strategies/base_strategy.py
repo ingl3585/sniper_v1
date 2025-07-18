@@ -7,7 +7,6 @@ from typing import Dict, Any, Optional, List
 from dataclasses import dataclass
 from datetime import datetime
 import numpy as np
-import pandas as pd
 from src.infra.nt_bridge import MarketData, TradeSignal
 from src.utils.price_history_manager import PriceHistoryManager
 
@@ -323,3 +322,75 @@ class BaseStrategy(ABC):
             'last_signal': self.last_signal_time,
             'price_history_status': self.price_history_manager.get_status()
         }
+    
+    def calculate_volatility_metrics(self, market_data: MarketData) -> Dict[str, Any]:
+        """Calculate comprehensive volatility metrics for all timeframes."""
+        volatility_metrics = {}
+        
+        timeframes = ['1m', '5m', '15m', '30m', '1h']
+        config = self.system_config.technical_analysis
+        
+        for timeframe in timeframes:
+            # Realized volatility for multiple periods
+            realized_vols = self.price_history_manager.calculate_realized_volatility(
+                timeframe, config.realized_vol_periods
+            )
+            
+            # Volatility regime
+            regime = self.price_history_manager.calculate_volatility_regime(
+                timeframe, config.vol_regime_threshold
+            )
+            
+            # Volatility percentile
+            current_vol = realized_vols.get('20_period', 0.0)
+            percentile = self.price_history_manager.calculate_volatility_percentile(
+                timeframe, current_vol, config.vol_percentile_lookback
+            )
+            
+            # Volatility breakout detection
+            breakout_info = self.price_history_manager.calculate_volatility_breakout(
+                timeframe, config.vol_breakout_threshold
+            )
+            
+            volatility_metrics[timeframe] = {
+                'realized_volatility': realized_vols,
+                'regime': regime,
+                'percentile': percentile,
+                'breakout': breakout_info
+            }
+        
+        return volatility_metrics
+    
+    def is_volatility_regime(self, timeframe: str, regime: str) -> bool:
+        """Check if current volatility regime matches specified regime."""
+        current_regime = self.price_history_manager.calculate_volatility_regime(timeframe)
+        return current_regime == regime
+    
+    def is_volatility_breakout(self, timeframe: str, direction: str = 'any') -> bool:
+        """Check if volatility breakout is occurring."""
+        breakout_info = self.price_history_manager.calculate_volatility_breakout(timeframe)
+        if not breakout_info or not breakout_info.get('is_breakout', False):
+            return False
+        
+        if direction == 'any':
+            return True
+        elif direction == 'up':
+            return breakout_info.get('breakout_direction') == 'up'
+        elif direction == 'down':
+            return breakout_info.get('breakout_direction') == 'down'
+        
+        return False
+    
+    def get_volatility_percentile(self, timeframe: str) -> float:
+        """Get current volatility percentile for timeframe."""
+        realized_vols = self.price_history_manager.calculate_realized_volatility(timeframe, (20,))
+        if not realized_vols:
+            return 0.5
+        
+        current_vol = realized_vols.get('20_period', 0.0)
+        return self.price_history_manager.calculate_volatility_percentile(timeframe, current_vol)
+    
+    def get_volatility_z_score(self, timeframe: str) -> float:
+        """Get volatility z-score for mean reversion analysis."""
+        breakout_info = self.price_history_manager.calculate_volatility_breakout(timeframe)
+        return breakout_info.get('z_score', 0.0) if breakout_info else 0.0

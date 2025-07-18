@@ -6,6 +6,7 @@ from collections import deque
 from typing import Dict, List, Optional
 import threading
 from dataclasses import dataclass
+import numpy as np
 from src.infra.nt_bridge import MarketData
 
 
@@ -190,3 +191,155 @@ class PriceHistoryManager:
                     'last_update': self.last_update[timeframe]
                 }
             return status
+    
+    def calculate_realized_volatility(self, timeframe: str, periods: tuple = (20, 60, 240)) -> Dict[str, float]:
+        """Calculate realized volatility for multiple lookback periods."""
+        with self._lock:
+            if timeframe not in self.timeframes:
+                return {}
+                
+            prices = list(self.timeframes[timeframe].prices)
+            if len(prices) < max(periods):
+                return {}
+            
+            # Calculate log returns
+            log_returns = []
+            for i in range(1, len(prices)):
+                if prices[i] > 0 and prices[i-1] > 0:
+                    log_returns.append(np.log(prices[i] / prices[i-1]))
+            
+            if len(log_returns) < max(periods):
+                return {}
+            
+            # Calculate realized volatility for each period
+            realized_vols = {}
+            for period in periods:
+                if len(log_returns) >= period:
+                    recent_returns = log_returns[-period:]
+                    # Calculate standard deviation and annualize
+                    std_dev = np.std(recent_returns, ddof=1)
+                    # Annualize based on timeframe
+                    timeframe_multiplier = self._get_annualization_multiplier(timeframe)
+                    annualized_vol = std_dev * np.sqrt(timeframe_multiplier)
+                    realized_vols[f'{period}_period'] = annualized_vol
+            
+            return realized_vols
+    
+    def calculate_volatility_percentile(self, timeframe: str, current_vol: float, lookback: int = 480) -> float:
+        """Calculate volatility percentile based on historical volatility."""
+        with self._lock:
+            if timeframe not in self.timeframes:
+                return 0.5
+                
+            prices = list(self.timeframes[timeframe].prices)
+            if len(prices) < lookback + 20:  # Need extra data for vol calculation
+                return 0.5
+            
+            # Calculate rolling volatility
+            vol_history = []
+            for i in range(20, min(len(prices), lookback + 20)):
+                window_prices = prices[i-20:i]
+                if len(window_prices) >= 20:
+                    log_returns = []
+                    for j in range(1, len(window_prices)):
+                        if window_prices[j] > 0 and window_prices[j-1] > 0:
+                            log_returns.append(np.log(window_prices[j] / window_prices[j-1]))
+                    
+                    if len(log_returns) >= 19:
+                        vol = np.std(log_returns, ddof=1)
+                        timeframe_multiplier = self._get_annualization_multiplier(timeframe)
+                        annualized_vol = vol * np.sqrt(timeframe_multiplier)
+                        vol_history.append(annualized_vol)
+            
+            if len(vol_history) < 10:
+                return 0.5
+                
+            # Calculate percentile
+            vol_history = np.array(vol_history)
+            percentile = np.mean(vol_history <= current_vol)
+            return percentile
+    
+    def calculate_volatility_regime(self, timeframe: str, threshold: float = 0.5) -> str:
+        """Determine volatility regime (low, medium, high)."""
+        realized_vols = self.calculate_realized_volatility(timeframe, (20,))
+        if not realized_vols:
+            return 'medium'
+            
+        current_vol = realized_vols.get('20_period', 0.0)
+        percentile = self.calculate_volatility_percentile(timeframe, current_vol)
+        
+        if percentile < 0.3:
+            return 'low'
+        elif percentile > 0.7:
+            return 'high'
+        else:
+            return 'medium'
+    
+    def calculate_volatility_breakout(self, timeframe: str, threshold: float = 2.0) -> Dict[str, float]:
+        """Detect volatility breakouts based on recent volatility expansion."""
+        with self._lock:
+            if timeframe not in self.timeframes:
+                return {}
+                
+            prices = list(self.timeframes[timeframe].prices)
+            if len(prices) < 100:  # Need sufficient data
+                return {}
+            
+            # Calculate recent volatility (last 20 periods)
+            recent_vol = self.calculate_realized_volatility(timeframe, (20,))
+            if not recent_vol:
+                return {}
+            
+            current_vol = recent_vol['20_period']
+            
+            # Calculate longer-term volatility distribution (last 100 periods)
+            long_term_vols = []
+            for i in range(40, min(len(prices), 120)):
+                window_prices = prices[i-20:i]
+                if len(window_prices) >= 20:
+                    log_returns = []
+                    for j in range(1, len(window_prices)):
+                        if window_prices[j] > 0 and window_prices[j-1] > 0:
+                            log_returns.append(np.log(window_prices[j] / window_prices[j-1]))
+                    
+                    if len(log_returns) >= 19:
+                        vol = np.std(log_returns, ddof=1)
+                        timeframe_multiplier = self._get_annualization_multiplier(timeframe)
+                        annualized_vol = vol * np.sqrt(timeframe_multiplier)
+                        long_term_vols.append(annualized_vol)
+            
+            if len(long_term_vols) < 20:
+                return {}
+            
+            # Calculate z-score for breakout detection
+            mean_vol = np.mean(long_term_vols)
+            std_vol = np.std(long_term_vols, ddof=1)
+            
+            if std_vol > 0:
+                z_score = (current_vol - mean_vol) / std_vol
+                is_breakout = abs(z_score) > threshold
+                breakout_direction = 'up' if z_score > threshold else 'down' if z_score < -threshold else 'none'
+                
+                return {
+                    'current_vol': current_vol,
+                    'mean_vol': mean_vol,
+                    'z_score': z_score,
+                    'is_breakout': is_breakout,
+                    'breakout_direction': breakout_direction,
+                    'breakout_strength': abs(z_score)
+                }
+            
+            return {}
+    
+    def _get_annualization_multiplier(self, timeframe: str) -> float:
+        """Get annualization multiplier based on timeframe."""
+        # For financial markets, we typically use trading days (252) and trading hours (6.5h/day)
+        # This gives us more realistic volatility numbers
+        timeframe_multipliers = {
+            '1m': 252 * 6.5 * 60,    # 98,280 minutes per trading year
+            '5m': 252 * 6.5 * 12,    # 19,656 five-minute bars per trading year
+            '15m': 252 * 6.5 * 4,    # 6,552 fifteen-minute bars per trading year
+            '30m': 252 * 6.5 * 2,    # 3,276 thirty-minute bars per trading year
+            '1h': 252 * 6.5          # 1,638 hourly bars per trading year
+        }
+        return timeframe_multipliers.get(timeframe, 1638)

@@ -20,6 +20,8 @@ class AllocationDecision:
     """Capital allocation decision from ML model."""
     mean_reversion_weight: float
     momentum_weight: float
+    vol_carry_weight: float
+    vol_breakout_weight: float
     confidence: float
     regime: str
     features: Dict[str, float]
@@ -57,10 +59,12 @@ class MetaAllocator:
         features = self._extract_features(market_data)
         
         if not self.is_trained:
-            # Default allocation if model not trained
+            # Default allocation if model not trained - equal weights across all strategies
             return AllocationDecision(
-                mean_reversion_weight=0.5,
-                momentum_weight=0.5,
+                mean_reversion_weight=0.25,
+                momentum_weight=0.25,
+                vol_carry_weight=0.25,
+                vol_breakout_weight=0.25,
                 confidence=0.5,
                 regime="unknown",
                 features=features
@@ -100,6 +104,39 @@ class MetaAllocator:
         # Initialize volatility features with defaults
         features['volatility_realized'] = market_data.volatility if market_data.volatility is not None else 0.0
         features['volatility_1h'] = 0.0
+        
+        # Volatility regime features for strategy selection
+        features['volatility_regime_low'] = 1.0 if market_data.volatility_regime == 'low' else 0.0
+        features['volatility_regime_medium'] = 1.0 if market_data.volatility_regime == 'medium' else 0.0
+        features['volatility_regime_high'] = 1.0 if market_data.volatility_regime == 'high' else 0.0
+        features['volatility_percentile'] = market_data.volatility_percentile
+        
+        # Volatility breakout features
+        features['volatility_breakout_detected'] = 0.0
+        features['volatility_breakout_strength'] = 0.0
+        features['volatility_breakout_direction'] = 0.0  # -1=down, 0=none, 1=up
+        
+        if market_data.volatility_breakout:
+            features['volatility_breakout_detected'] = 1.0 if market_data.volatility_breakout.get('is_breakout', False) else 0.0
+            features['volatility_breakout_strength'] = market_data.volatility_breakout.get('breakout_strength', 0.0)
+            breakout_dir = market_data.volatility_breakout.get('breakout_direction', 'none')
+            features['volatility_breakout_direction'] = 1.0 if breakout_dir == 'up' else -1.0 if breakout_dir == 'down' else 0.0
+        
+        # Multi-timeframe volatility features
+        features['volatility_1m'] = market_data.volatility_1m
+        features['volatility_5m'] = market_data.volatility_5m
+        features['volatility_15m'] = market_data.volatility_15m
+        features['volatility_30m'] = market_data.volatility_30m
+        
+        # Volatility term structure (carry opportunities)
+        features['vol_term_structure_slope'] = 0.0
+        features['vol_carry_opportunity'] = 0.0
+        
+        # Calculate volatility term structure slope
+        if market_data.volatility_5m > 0 and market_data.volatility_1h > 0:
+            features['vol_term_structure_slope'] = (market_data.volatility_1h - market_data.volatility_5m) / market_data.volatility_5m
+            # Carry opportunity strength
+            features['vol_carry_opportunity'] = min(1.0, abs(features['vol_term_structure_slope']) * 5.0)
         
         # Price-based features
         if market_data.price_1h and len(market_data.price_1h) >= 20:
@@ -177,53 +214,122 @@ class MetaAllocator:
     def _prediction_to_allocation(self, prediction: int, probabilities: np.ndarray, 
                                 features: Dict[str, float]) -> AllocationDecision:
         """Convert ML prediction to allocation decision."""
-        # Classes: 0=mean_reversion, 1=momentum, 2=balanced
+        # Classes: 0=mean_reversion, 1=momentum, 2=vol_carry, 3=vol_breakout, 4=balanced
         confidence = max(probabilities)
         
+        # Base allocations for each strategy type
         if prediction == 0:  # Mean reversion favored
-            mean_reversion_weight = 0.7
-            momentum_weight = 0.3
+            mean_reversion_weight = 0.5
+            momentum_weight = 0.2
+            vol_carry_weight = 0.2
+            vol_breakout_weight = 0.1
             regime = "mean_reverting"
         elif prediction == 1:  # Momentum favored
-            mean_reversion_weight = 0.3
-            momentum_weight = 0.7
-            regime = "trending"
-        else:  # Balanced
-            mean_reversion_weight = 0.5
+            mean_reversion_weight = 0.2
             momentum_weight = 0.5
+            vol_carry_weight = 0.1
+            vol_breakout_weight = 0.2
+            regime = "trending"
+        elif prediction == 2:  # Vol carry favored
+            mean_reversion_weight = 0.2
+            momentum_weight = 0.1
+            vol_carry_weight = 0.5
+            vol_breakout_weight = 0.2
+            regime = "vol_carry"
+        elif prediction == 3:  # Vol breakout favored
+            mean_reversion_weight = 0.1
+            momentum_weight = 0.2
+            vol_carry_weight = 0.2
+            vol_breakout_weight = 0.5
+            regime = "vol_breakout"
+        else:  # Balanced (prediction == 4)
+            mean_reversion_weight = 0.25
+            momentum_weight = 0.25
+            vol_carry_weight = 0.25
+            vol_breakout_weight = 0.25
             regime = "balanced"
+        
+        # Adjust weights based on market conditions and features
+        self._adjust_weights_based_on_features(features, locals())
         
         # Adjust weights based on confidence
         if confidence < 0.6:
             # Low confidence -> more balanced allocation
-            mean_reversion_weight = 0.4 + (mean_reversion_weight - 0.5) * 0.2
-            momentum_weight = 0.4 + (momentum_weight - 0.5) * 0.2
+            target_balanced = 0.25
+            mean_reversion_weight = target_balanced + (mean_reversion_weight - target_balanced) * 0.3
+            momentum_weight = target_balanced + (momentum_weight - target_balanced) * 0.3
+            vol_carry_weight = target_balanced + (vol_carry_weight - target_balanced) * 0.3
+            vol_breakout_weight = target_balanced + (vol_breakout_weight - target_balanced) * 0.3
         
         # Ensure weights sum to 1
-        total_weight = mean_reversion_weight + momentum_weight
+        total_weight = mean_reversion_weight + momentum_weight + vol_carry_weight + vol_breakout_weight
         mean_reversion_weight /= total_weight
         momentum_weight /= total_weight
+        vol_carry_weight /= total_weight
+        vol_breakout_weight /= total_weight
         
         return AllocationDecision(
             mean_reversion_weight=mean_reversion_weight,
             momentum_weight=momentum_weight,
+            vol_carry_weight=vol_carry_weight,
+            vol_breakout_weight=vol_breakout_weight,
             confidence=confidence,
             regime=regime,
             features=features
         )
     
+    def _adjust_weights_based_on_features(self, features: Dict[str, float], weights: Dict[str, float]):
+        """Adjust strategy weights based on current market features."""
+        # Increase vol carry weight when strong term structure slope is detected
+        if features.get('vol_carry_opportunity', 0) > 0.5:
+            weights['vol_carry_weight'] *= 1.3
+        
+        # Increase vol breakout weight when volatility breakout is detected
+        if features.get('volatility_breakout_detected', 0) > 0:
+            weights['vol_breakout_weight'] *= 1.5
+        
+        # Reduce vol strategies in extreme volatility regimes
+        if features.get('volatility_regime_high', 0) > 0:
+            weights['vol_carry_weight'] *= 0.8  # Reduce carry in high vol
+        
+        if features.get('volatility_regime_low', 0) > 0:
+            weights['vol_breakout_weight'] *= 0.7  # Reduce breakout in low vol
+        
+        # Increase momentum weight when strong trend detected
+        if features.get('regime_trend_strength', 0) > 0.7:
+            weights['momentum_weight'] *= 1.2
+        
+        # Increase mean reversion weight when high mean reversion strength
+        if features.get('regime_mean_reversion', 0) > 0.7:
+            weights['mean_reversion_weight'] *= 1.2
+    
     def _store_prediction_data(self, features: Dict[str, float], 
                              allocation: AllocationDecision,
                              mean_reversion_perf: float, 
-                             momentum_perf: float):
+                             momentum_perf: float,
+                             vol_carry_perf: float = 0.0,
+                             vol_breakout_perf: float = 0.0):
         """Store prediction data for model retraining."""
         # Determine actual best strategy (target)
-        if mean_reversion_perf > momentum_perf * 1.1:
-            target = 0  # Mean reversion
-        elif momentum_perf > mean_reversion_perf * 1.1:
-            target = 1  # Momentum
+        performances = {
+            0: mean_reversion_perf,    # Mean reversion
+            1: momentum_perf,          # Momentum
+            2: vol_carry_perf,         # Vol carry
+            3: vol_breakout_perf,      # Vol breakout
+        }
+        
+        # Find best performing strategy
+        best_strategy = max(performances, key=performances.get)
+        best_perf = performances[best_strategy]
+        
+        # Check if performance is significantly better than others
+        other_perfs = [p for i, p in performances.items() if i != best_strategy]
+        avg_other_perf = sum(other_perfs) / len(other_perfs) if other_perfs else 0
+        
+        if best_perf > avg_other_perf * 1.1:
+            target = best_strategy
         else:
-            target = 2  # Balanced
+            target = 4  # Balanced
         
         # Store feature vector and target
         self.feature_history.append(features)
@@ -263,7 +369,7 @@ class MetaAllocator:
             X_scaled, y, test_size=0.2, random_state=42, stratify=y
         )
         
-        # Train LightGBM model
+        # Train LightGBM model for 5 classes (0-4)
         self.model = lgb.LGBMClassifier(
             n_estimators=100,
             learning_rate=0.1,
@@ -271,6 +377,7 @@ class MetaAllocator:
             feature_fraction=0.8,
             bagging_fraction=0.8,
             bagging_freq=5,
+            num_class=5,  # 5 classes: mean_reversion, momentum, vol_carry, vol_breakout, balanced
             random_state=42,
             verbose=-1
         )

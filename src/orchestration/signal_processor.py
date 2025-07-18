@@ -13,9 +13,11 @@ from src.models.ppo_execution import PPOExecutionAgent, ExecutionDecision
 class SignalProcessor:
     """Processes signals from strategies and converts them to executable trades."""
     
-    def __init__(self, mean_reversion, momentum, meta_allocator=None, execution_agent=None):
+    def __init__(self, mean_reversion, momentum, vol_carry=None, vol_breakout=None, meta_allocator=None, execution_agent=None):
         self.mean_reversion = mean_reversion
         self.momentum = momentum
+        self.vol_carry = vol_carry
+        self.vol_breakout = vol_breakout
         self.meta_allocator = meta_allocator
         self.execution_agent = execution_agent
         self.logger = logging.getLogger(__name__)
@@ -24,7 +26,10 @@ class SignalProcessor:
         """Process market data and generate trading signals."""
         self.logger.info("=== Signal Processing Start ===")
         
-        # Generate signals from strategies
+        # Generate signals from all strategies
+        signals = {}
+        
+        # Mean Reversion Strategy
         self.logger.info("Generating mean reversion signal...")
         mean_reversion_signal = self.mean_reversion.generate_signal(market_data)
         if mean_reversion_signal:
@@ -34,9 +39,11 @@ class SignalProcessor:
                            f"Confidence={mean_reversion_signal.confidence:.3f}, "
                            f"Entry=${mean_reversion_signal.entry_price:.2f}, "
                            f"Stop={stop_str}, Target={target_str}")
+            signals['mean_reversion'] = mean_reversion_signal
         else:
             self.logger.info("Mean Reversion Signal: None")
         
+        # Momentum Strategy
         self.logger.info("Generating momentum signal...")
         momentum_signal = self.momentum.generate_signal(market_data)
         if momentum_signal:
@@ -46,19 +53,52 @@ class SignalProcessor:
                            f"Confidence={momentum_signal.confidence:.3f}, "
                            f"Entry=${momentum_signal.entry_price:.2f}, "
                            f"Stop={stop_str}, Target={target_str}")
+            signals['momentum'] = momentum_signal
         else:
             self.logger.info("Momentum Signal: None")
         
+        # Volatility Carry Strategy (if available)
+        if self.vol_carry:
+            self.logger.info("Generating volatility carry signal...")
+            vol_carry_signal = self.vol_carry.generate_signal(market_data)
+            if vol_carry_signal:
+                stop_str = f"${vol_carry_signal.stop_price:.2f}" if vol_carry_signal.stop_price else 'None'
+                target_str = f"${vol_carry_signal.target_price:.2f}" if vol_carry_signal.target_price else 'None'
+                self.logger.info(f"Vol Carry Signal: Action={vol_carry_signal.action}, "
+                               f"Confidence={vol_carry_signal.confidence:.3f}, "
+                               f"Entry=${vol_carry_signal.entry_price:.2f}, "
+                               f"Stop={stop_str}, Target={target_str}")
+                signals['vol_carry'] = vol_carry_signal
+            else:
+                self.logger.info("Vol Carry Signal: None")
+        
+        # Volatility Breakout Strategy (if available)
+        if self.vol_breakout:
+            self.logger.info("Generating volatility breakout signal...")
+            vol_breakout_signal = self.vol_breakout.generate_signal(market_data)
+            if vol_breakout_signal:
+                stop_str = f"${vol_breakout_signal.stop_price:.2f}" if vol_breakout_signal.stop_price else 'None'
+                target_str = f"${vol_breakout_signal.target_price:.2f}" if vol_breakout_signal.target_price else 'None'
+                self.logger.info(f"Vol Breakout Signal: Action={vol_breakout_signal.action}, "
+                               f"Confidence={vol_breakout_signal.confidence:.3f}, "
+                               f"Entry=${vol_breakout_signal.entry_price:.2f}, "
+                               f"Stop={stop_str}, Target={target_str}")
+                signals['vol_breakout'] = vol_breakout_signal
+            else:
+                self.logger.info("Vol Breakout Signal: None")
+        
         # Get allocation decision
-        allocation = self._get_allocation_decision(market_data)
+        allocation = self._get_allocation_decision(market_data, signals)
         if allocation:
             self.logger.info(f"Meta Allocator: MR Weight={allocation.mean_reversion_weight:.2f}, "
-                           f"Momentum Weight={allocation.momentum_weight:.2f}")
+                           f"Momentum Weight={allocation.momentum_weight:.2f}, "
+                           f"Vol Carry Weight={allocation.vol_carry_weight:.2f}, "
+                           f"Vol Breakout Weight={allocation.vol_breakout_weight:.2f}")
         else:
             self.logger.info("Meta Allocator: Using equal weights")
         
         # Select best signal
-        final_signal = self._select_final_signal(mean_reversion_signal, momentum_signal, allocation)
+        final_signal = self._select_final_signal(signals, allocation)
         
         if final_signal:
             trade_signal = self._convert_to_trade_signal(final_signal, market_data)
@@ -73,42 +113,56 @@ class SignalProcessor:
         
         return None
     
-    def _get_allocation_decision(self, market_data: MarketData) -> Optional[AllocationDecision]:
+    def _get_allocation_decision(self, market_data: MarketData, signals: dict) -> Optional[AllocationDecision]:
         """Get allocation decision from meta-allocator."""
         if not self.meta_allocator:
             return None
         
         try:
             # Use default performance metrics for now
+            # TODO: Update to use actual performance metrics
             return self.meta_allocator.get_allocation(market_data, 0.0, 0.0)
         except Exception as e:
             self.logger.error(f"Error getting allocation decision: {e}")
             return None
     
-    def _select_final_signal(self, mean_reversion_signal, momentum_signal, allocation):
+    def _select_final_signal(self, signals: dict, allocation):
         """Select final signal based on allocation and signal strength."""
-        if not mean_reversion_signal and not momentum_signal:
+        if not signals:
             return None
         
         # Default equal weighting if no allocation
         if not allocation:
-            if mean_reversion_signal and momentum_signal:
-                return mean_reversion_signal if mean_reversion_signal.confidence > momentum_signal.confidence else momentum_signal
-            return mean_reversion_signal or momentum_signal
+            # Select signal with highest confidence
+            best_signal = max(signals.items(), key=lambda x: x[1].confidence)
+            self.logger.info(f"Selected {best_signal[0]} signal with confidence {best_signal[1].confidence:.2f} (equal weights)")
+            return best_signal[1]
         
         # Use allocation weights
-        signals = []
-        if mean_reversion_signal:
-            signals.append(('mean_reversion', mean_reversion_signal, allocation.mean_reversion_weight))
-        if momentum_signal:
-            signals.append(('momentum', momentum_signal, allocation.momentum_weight))
+        weighted_signals = []
         
-        if not signals:
+        # Add mean reversion signal
+        if 'mean_reversion' in signals:
+            weighted_signals.append(('mean_reversion', signals['mean_reversion'], allocation.mean_reversion_weight))
+        
+        # Add momentum signal
+        if 'momentum' in signals:
+            weighted_signals.append(('momentum', signals['momentum'], allocation.momentum_weight))
+        
+        # Add volatility carry signal (if available and allocation supports it)
+        if 'vol_carry' in signals and hasattr(allocation, 'vol_carry_weight'):
+            weighted_signals.append(('vol_carry', signals['vol_carry'], allocation.vol_carry_weight))
+        
+        # Add volatility breakout signal (if available and allocation supports it)
+        if 'vol_breakout' in signals and hasattr(allocation, 'vol_breakout_weight'):
+            weighted_signals.append(('vol_breakout', signals['vol_breakout'], allocation.vol_breakout_weight))
+        
+        if not weighted_signals:
             return None
         
         # Select signal with highest weighted score
-        best_signal = max(signals, key=lambda x: x[1].confidence * x[2])
-        self.logger.info(f"Selected {best_signal[0]} signal with confidence {best_signal[1].confidence:.2f}")
+        best_signal = max(weighted_signals, key=lambda x: x[1].confidence * x[2])
+        self.logger.info(f"Selected {best_signal[0]} signal with confidence {best_signal[1].confidence:.2f} and weight {best_signal[2]:.2f}")
         
         return best_signal[1]
     

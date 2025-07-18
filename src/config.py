@@ -57,6 +57,14 @@ class TechnicalAnalysisConfig:
     default_volatility: float = 0.02
     rsi_neutral: float = 50.0
     
+    # Volatility calculation parameters
+    realized_vol_periods: tuple = (20, 60, 240)  # 20min, 1hr, 4hr lookbacks
+    vol_percentile_lookback: int = 480  # 8 hours for percentile calculation
+    vol_regime_threshold: float = 0.5  # 50th percentile threshold for regime detection
+    vol_breakout_threshold: float = 2.0  # Standard deviations for breakout detection
+    vol_annualization_factor: int = 525600  # minutes per year (365 * 24 * 60)
+    vol_smoothing_alpha: float = 0.1  # EMA smoothing factor for volatility
+    
     # Financial constants
     annualization_factor: int = 1440  # minutes per trading day
     position_size_divisor: int = 100
@@ -144,12 +152,79 @@ class MomentumConfig:
 
 
 @dataclass
+class VolCarryConfig:
+    """Volatility carry strategy configuration."""
+    
+    # Term Structure Thresholds
+    contango_threshold: float = 0.15        # 15% slope for contango signal
+    backwardation_threshold: float = 0.15   # 15% slope for backwardation signal
+    
+    # Carry Opportunity Validation
+    min_carry_confidence: float = 0.5       # Minimum confidence for carry trades
+    target_atr_multiplier: float = 2.0      # Target distance in ATR multiples
+    
+    # Volatility Regime Filters
+    avoid_low_vol_sells: bool = True        # Don't sell vol in low vol regimes
+    avoid_high_vol_buys: bool = True        # Don't buy vol in high vol regimes
+    max_breakout_strength: float = 2.5      # Avoid trades during strong breakouts
+    
+    # Risk Management
+    max_position_holding_hours: int = 24    # Max time to hold carry positions
+    volatility_stop_multiplier: float = 1.5 # Stop based on volatility expansion
+
+
+@dataclass
+class VolBreakoutConfig:
+    """Volatility breakout strategy configuration."""
+    
+    # Breakout Detection
+    breakout_z_threshold: float = 2.0       # Z-score threshold for breakout detection
+    min_regime_strength: float = 1.5        # Minimum strength for regime transition
+    
+    # Momentum and Price Thresholds
+    momentum_threshold: float = 0.01        # 1% price momentum threshold
+    price_extension_threshold: float = 1.5  # Price extension z-score threshold
+    
+    # Signal Validation
+    min_volume_confirmation: float = 1.2    # 20% above average volume for confirmation
+    target_atr_multiplier: float = 2.5      # Target distance in ATR multiples
+    
+    # Cooldown and Rate Limiting
+    cooldown_minutes: int = 30              # Cooldown period between signals
+    max_trades_per_session: int = 8         # Max breakout trades per session
+    
+    # Risk Management
+    max_volatility_exposure: float = 0.25   # Max % of portfolio exposed to vol plays
+    regime_transition_timeout: int = 60     # Minutes to wait for regime confirmation
+
+
+@dataclass
 class MetaAllocatorConfig:
     """Meta allocator ML model configuration."""
     model_path: str = "data/meta_allocator_model.pkl"
     lookback_period: int = 60
     retrain_interval: int = 1000
     feature_history_size: int = 5000
+    
+    # Strategy allocation parameters
+    strategy_count: int = 4  # MeanReversion, Momentum, VolCarry, VolBreakout
+    strategy_names: tuple = ("MeanReversion", "Momentum", "VolCarry", "VolBreakout")
+    
+    # Allocation constraints
+    min_strategy_weight: float = 0.05    # Minimum 5% allocation per strategy
+    max_strategy_weight: float = 0.60    # Maximum 60% allocation per strategy
+    rebalance_threshold: float = 0.10    # Rebalance when allocation drift > 10%
+    
+    # Volatility strategy specific parameters
+    vol_strategy_max_combined: float = 0.40  # Max combined weight for vol strategies
+    vol_regime_adjustment: bool = True        # Adjust vol strategy weights based on regime
+    
+    # Feature engineering for 4-strategy model
+    feature_lookback_bars: int = 240         # 4 hours of 1-minute bars
+    volatility_feature_weight: float = 0.3   # Weight for volatility-based features
+    momentum_feature_weight: float = 0.25    # Weight for momentum-based features
+    mean_reversion_feature_weight: float = 0.25  # Weight for mean reversion features
+    market_regime_feature_weight: float = 0.2    # Weight for market regime features
 
 
 @dataclass
@@ -172,6 +247,8 @@ class SystemConfig:
     risk_management: RiskManagementConfig
     mean_reversion: MeanReversionConfig
     momentum: MomentumConfig
+    vol_carry: VolCarryConfig
+    vol_breakout: VolBreakoutConfig
     meta_allocator: MetaAllocatorConfig
     ppo_execution: PPOExecutionConfig
     
@@ -186,6 +263,8 @@ class SystemConfig:
             risk_management=RiskManagementConfig(),
             mean_reversion=MeanReversionConfig(),
             momentum=MomentumConfig(),
+            vol_carry=VolCarryConfig(),
+            vol_breakout=VolBreakoutConfig(),
             meta_allocator=MetaAllocatorConfig(),
             ppo_execution=PPOExecutionConfig()
         )
@@ -201,6 +280,8 @@ class SystemConfig:
             risk_management=RiskManagementConfig(),
             mean_reversion=MeanReversionConfig(),
             momentum=MomentumConfig(),
+            vol_carry=VolCarryConfig(),
+            vol_breakout=VolBreakoutConfig(),
             meta_allocator=MetaAllocatorConfig(),
             ppo_execution=PPOExecutionConfig()
         )

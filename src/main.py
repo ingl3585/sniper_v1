@@ -12,6 +12,8 @@ from typing import Optional
 from src.infra.nt_bridge import NinjaTradeBridge, MarketData, TradeCompletion
 from src.strategies.mean_reversion import MeanReversionStrategy
 from src.strategies.momentum import MomentumStrategy
+from src.strategies.volatility_carry import VolatilityCarryStrategy
+from src.strategies.volatility_breakout import VolatilityBreakoutStrategy
 from src.models.meta_allocator import MetaAllocator
 from src.models.ppo_execution import PPOExecutionAgent
 from src.utils.data_manager import DataManager
@@ -56,13 +58,22 @@ class TradingSystem:
         # Trading strategies
         self.mean_reversion = MeanReversionStrategy(self.config.mean_reversion, self.config, self.price_history_manager)
         self.momentum = MomentumStrategy(self.config.momentum, self.config, self.price_history_manager)
+        self.vol_carry = VolatilityCarryStrategy(self.config.vol_carry, self.config, self.price_history_manager)
+        self.vol_breakout = VolatilityBreakoutStrategy(self.config.vol_breakout, self.config, self.price_history_manager)
         
         # ML components
         self.meta_allocator = MetaAllocator(self.config.meta_allocator.model_path, self.config.meta_allocator) if self.config.trading.enable_ml_allocator else None
         self.execution_agent = PPOExecutionAgent(self.config.ppo_execution.model_path) if self.config.trading.enable_rl_execution else None
         
         # Orchestration components
-        self.signal_processor = SignalProcessor(self.mean_reversion, self.momentum, self.meta_allocator, self.execution_agent)
+        self.signal_processor = SignalProcessor(
+            self.mean_reversion, 
+            self.momentum, 
+            self.vol_carry, 
+            self.vol_breakout,
+            self.meta_allocator, 
+            self.execution_agent
+        )
         self.risk_manager = RiskManager(self.config)
         self.connection_manager = ConnectionManager(self.bridge, self.data_manager, self.price_history_manager)
         

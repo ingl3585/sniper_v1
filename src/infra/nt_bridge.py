@@ -36,6 +36,16 @@ class MarketData:
     current_price: float
     timestamp: int
     
+    # Volatility fields
+    volatility_1m: float = 0.0
+    volatility_5m: float = 0.0
+    volatility_15m: float = 0.0
+    volatility_30m: float = 0.0
+    volatility_1h: float = 0.0
+    volatility_regime: str = 'medium'  # 'low', 'medium', 'high'
+    volatility_percentile: float = 0.5
+    volatility_breakout: Optional[dict] = None  # Breakout detection results
+    
     @property
     def data_age_seconds(self) -> float:
         """Calculate age of market data in seconds."""
