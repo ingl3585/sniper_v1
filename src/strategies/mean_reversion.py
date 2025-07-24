@@ -94,7 +94,7 @@ class MeanReversionStrategy(BaseStrategy):
             return None
         
         # Calculate and validate VWAP
-        vwap_data = self._calculate_and_validate_vwap(prices, volumes, timeframe)
+        vwap_data = self._calculate_and_validate_vwap(prices, volumes, timeframe, has_price_change)
         if not vwap_data:
             return None
         
@@ -136,7 +136,7 @@ class MeanReversionStrategy(BaseStrategy):
             return False
         return True
     
-    def _calculate_and_validate_vwap(self, prices: list, volumes: list, timeframe: str) -> Optional[tuple]:
+    def _calculate_and_validate_vwap(self, prices: list, volumes: list, timeframe: str, has_price_change: bool = False) -> Optional[tuple]:
         """Calculate VWAP and perform validation checks."""
         vwap_prices = prices[-self.config.vwap_period:]
         vwap_volumes = volumes[-self.config.vwap_period:]
@@ -147,18 +147,30 @@ class MeanReversionStrategy(BaseStrategy):
             self.logger.warning(f"{timeframe}: VWAP calculation returned 0")
             return None
         
-        # VWAP validation logging
+        # VWAP validation logging (rate limited)
+        if has_price_change or self.should_log_detailed_analysis():
+            total_pv = sum(p * v for p, v in zip(vwap_prices, vwap_volumes))
+            total_volume = sum(vwap_volumes)
+            manual_vwap = total_pv / total_volume if total_volume > 0 else 0
+            simple_avg = sum(vwap_prices) / len(vwap_prices)
+            
+            self.logger.info(f"{timeframe} VWAP Validation:")
+            self.logger.info(f"  VWAP Function Result: ${vwap:.2f}")
+            self.logger.info(f"  Manual Calculation: ${manual_vwap:.2f}")
+            self.logger.info(f"  Simple Average: ${simple_avg:.2f}")
+            self.logger.info(f"  Total Price*Volume: ${total_pv:,.0f}")
+            self.logger.info(f"  Total Volume: {total_volume:,.0f}")
+            
+            # Log volume distribution
+            volume_weights = [v/total_volume for v in vwap_volumes]
+            top_3_weights = sorted(volume_weights, reverse=True)[:3]
+            self.logger.info(f"  Top 3 Volume Weights: {[f'{w:.1%}' for w in top_3_weights]}")
+        
+        # Always check for validation issues (but only warn once)
         total_pv = sum(p * v for p, v in zip(vwap_prices, vwap_volumes))
         total_volume = sum(vwap_volumes)
         manual_vwap = total_pv / total_volume if total_volume > 0 else 0
         simple_avg = sum(vwap_prices) / len(vwap_prices)
-        
-        self.logger.info(f"{timeframe} VWAP Validation:")
-        self.logger.info(f"  VWAP Function Result: ${vwap:.2f}")
-        self.logger.info(f"  Manual Calculation: ${manual_vwap:.2f}")
-        self.logger.info(f"  Simple Average: ${simple_avg:.2f}")
-        self.logger.info(f"  Total Price*Volume: ${total_pv:,.0f}")
-        self.logger.info(f"  Total Volume: {total_volume:,.0f}")
         
         # Ensure VWAP is reasonable (within 5% of simple average)
         if abs(vwap - simple_avg) / simple_avg > 0.05:
@@ -168,11 +180,6 @@ class MeanReversionStrategy(BaseStrategy):
         max_volume = max(vwap_volumes)
         if max_volume > total_volume * 0.5:
             self.logger.warning(f"{timeframe}: Single bar dominates volume - max: {max_volume:.0f} vs total: {total_volume:.0f}")
-        
-        # Log volume distribution
-        volume_weights = [v/total_volume for v in vwap_volumes]
-        top_3_weights = sorted(volume_weights, reverse=True)[:3]
-        self.logger.info(f"  Top 3 Volume Weights: {[f'{w:.1%}' for w in top_3_weights]}")
         
         return vwap, vwap_prices, vwap_volumes
     
@@ -247,20 +254,20 @@ class MeanReversionStrategy(BaseStrategy):
         self.logger.info(f"Calculated ATR: ${atr:.2f}")
     
     def _check_signal_conditions(self, z_score: float, rsi: float, current_volume: float, timeframe: str) -> tuple:
-        """Check oversold/overbought signal conditions."""
-        # Threshold checks
-        self.logger.info(f"Thresholds Check:")
-        self.logger.info(f"Z-Score {z_score:.3f} vs ±{self.config.deviation_threshold}")
-        self.logger.info(f"RSI {rsi:.2f} vs {self.config.rsi_oversold}/{self.config.rsi_overbought}")
-        self.logger.info(f"Volume {current_volume:.0f} vs {self.config.min_volume_threshold}")
-        
+        """Check oversold/overbought signal conditions."""        
         # Signal conditions
         oversold = z_score < -self.config.deviation_threshold and rsi < self.config.rsi_oversold
         overbought = z_score > self.config.deviation_threshold and rsi > self.config.rsi_overbought
         
-        self.logger.info(f"Signal Conditions:")
-        self.logger.info(f"Oversold: {oversold} (z < -{self.config.deviation_threshold} AND rsi < {self.config.rsi_oversold})")
-        self.logger.info(f"Overbought: {overbought} (z > {self.config.deviation_threshold} AND rsi > {self.config.rsi_overbought})")
+        # Rate limited logging for signal conditions
+        if self.should_log_signal_conditions():
+            self.logger.info(f"Thresholds Check:")
+            self.logger.info(f"Z-Score {z_score:.3f} vs ±{self.config.deviation_threshold}")
+            self.logger.info(f"RSI {rsi:.2f} vs {self.config.rsi_oversold}/{self.config.rsi_overbought}")
+            self.logger.info(f"Volume {current_volume:.0f} vs {self.config.min_volume_threshold}")
+            self.logger.info(f"Signal Conditions:")
+            self.logger.info(f"Oversold: {oversold} (z < -{self.config.deviation_threshold} AND rsi < {self.config.rsi_oversold})")
+            self.logger.info(f"Overbought: {overbought} (z > {self.config.deviation_threshold} AND rsi > {self.config.rsi_overbought})")
         
         return oversold, overbought
     
@@ -453,7 +460,8 @@ class MeanReversionStrategy(BaseStrategy):
         primary_signal = signal_15m if signal_15m else signal_5m
         
         if not primary_signal:
-            self.logger.info("No primary signal from 5m or 15m timeframes")
+            if self.should_log_signal_conditions():
+                self.logger.info("No primary signal from 5m or 15m timeframes")
             return None
         
         # Check if signal meets minimum confidence threshold

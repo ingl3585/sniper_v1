@@ -46,7 +46,8 @@ class VolatilityBreakoutStrategy(BaseStrategy):
             # Analyze volatility breakout
             primary_signal = self._analyze_volatility_breakout(market_data)
             if not primary_signal:
-                self.logger.info("VolBreakout: No breakout signal generated")
+                if self.should_log_signal_conditions():
+                    self.logger.info("VolBreakout: No breakout signal generated")
                 return None
             
             # Apply regime filters
@@ -128,25 +129,29 @@ class VolatilityBreakoutStrategy(BaseStrategy):
     
     def _get_breakout_info(self, timeframe: str) -> Optional[Dict[str, Any]]:
         """Get volatility breakout information with validation."""
-        self.logger.info(f"VolBreakout: Analyzing {timeframe} timeframe for breakouts")
+        if self.should_log_detailed_analysis():
+            self.logger.info(f"VolBreakout: Analyzing {timeframe} timeframe for breakouts")
         
         breakout_info = self.price_history_manager.calculate_volatility_breakout(
             timeframe, self.config.breakout_z_threshold
         )
         
         if not breakout_info:
-            self.logger.info("VolBreakout: No breakout info returned from price history manager")
+            if self.should_log_detailed_analysis():
+                self.logger.info("VolBreakout: No breakout info returned from price history manager")
             return None
         
-        self.logger.info(f"VolBreakout: Breakout info received: {breakout_info}")
+        if self.should_log_detailed_analysis():
+            self.logger.info(f"VolBreakout: Breakout info received: {breakout_info}")
         return breakout_info
     
     def _extract_breakout_data(self, breakout_info: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """Extract and validate breakout data."""
         # Check for significant breakout
         if not breakout_info.get('is_breakout', False):
-            self.logger.info(f"VolBreakout: No significant breakout detected")
-            self.logger.info(f"VolBreakout: Current z-score: {breakout_info.get('z_score', 0.0):.3f}, threshold: {self.config.breakout_z_threshold}")
+            if self.should_log_signal_conditions():
+                self.logger.info(f"VolBreakout: No significant breakout detected")
+                self.logger.info(f"VolBreakout: Current z-score: {breakout_info.get('z_score', 0.0):.3f}, threshold: {self.config.breakout_z_threshold}")
             return None
         
         breakout_data = {

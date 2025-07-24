@@ -166,6 +166,10 @@ class TradingSystem:
             # Store current market data for risk management
             self.current_market_data = market_data
             
+            # Don't generate signals until historical data is loaded
+            if not self.connection_manager.is_ready_for_trading():
+                return
+            
             # Process market data through signal processor
             trade_signal = self.signal_processor.process_market_data(market_data)
             
@@ -193,6 +197,10 @@ class TradingSystem:
     def _process_realtime_tick_signals(self, market_data: MarketData, tick_data: dict):
         """Process signals with real-time tick data for immediate execution."""
         try:
+            # Don't generate signals until historical data is loaded
+            if not self.connection_manager.is_ready_for_trading():
+                return
+                
             # Generate signals with real-time flag
             trade_signal = self.signal_processor.process_market_data(market_data, is_realtime_tick=True)
             

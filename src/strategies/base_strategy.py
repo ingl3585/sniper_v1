@@ -44,7 +44,9 @@ class BaseStrategy(ABC):
         self.logger = get_logger(f"strategies.{name.lower()}")
         self.logger.set_context(strategy=name.lower(), component='strategy')
         self.last_detailed_log_time = 0  # Rate limit detailed analysis logs
-        self.log_interval = 60  # Log detailed analysis every 60 seconds
+        self.log_interval = 30  # Log detailed analysis every 30 seconds
+        self.last_signal_log_time = 0  # Rate limit signal condition logs
+        self.signal_log_interval = 10  # Log signal conditions every 10 seconds
         
         # Price change tracking
         self.last_price = None
@@ -65,6 +67,14 @@ class BaseStrategy(ABC):
             self._enable_detailed_logging = True
             return True
         self._enable_detailed_logging = False
+        return False
+    
+    def should_log_signal_conditions(self) -> bool:
+        """Check if enough time has passed to log signal conditions."""
+        current_time = time.time()
+        if current_time - self.last_signal_log_time > self.signal_log_interval:
+            self.last_signal_log_time = current_time
+            return True
         return False
     
     def log_if_enabled(self, message: str, level: str = "info"):
@@ -166,25 +176,46 @@ class BaseStrategy(ABC):
     def calculate_position_size(self, market_data: MarketData, 
                               stop_price: float) -> int:
         """Calculate position size based on risk management."""
-        if market_data.account_balance <= 0:
-            return 0
-        
         current_price = market_data.current_price
+        
+        # Debug logging for position sizing
+        self.logger.info(f"Position sizing debug: account_balance={market_data.account_balance}, "
+                        f"buying_power={market_data.buying_power}, current_price={current_price}, "
+                        f"stop_price={stop_price}")
+        
+        # Basic validation
         if current_price <= 0 or stop_price <= 0:
+            self.logger.warning(f"Invalid prices: current={current_price}, stop={stop_price}")
             return 1
         
         # Calculate risk per share
         risk_per_share = abs(current_price - stop_price)
+        if risk_per_share <= 0:
+            self.logger.warning(f"Invalid risk per share: {risk_per_share}")
+            return 1
         
-        # Calculate position size based on risk
-        risk_amount = market_data.account_balance * self.system_config.risk_management.risk_per_trade
-        position_size = int(risk_amount / risk_per_share)
+        # For futures like MNQ, use a default account size if balance is 0 or unavailable
+        account_balance = market_data.account_balance
+        if account_balance <= 0:
+            account_balance = 50000.0  # Default $50K account for MNQ
+            self.logger.info(f"Using default account balance: ${account_balance}")
         
-        # Apply position limits
-        max_size = min(self.system_config.risk_management.max_position_size, 
-                      int(market_data.buying_power / (current_price * 100)))
+        # Calculate position size based on risk (0.25% risk per trade)
+        risk_amount = account_balance * self.system_config.risk_management.risk_per_trade
+        calculated_size = int(risk_amount / risk_per_share)
         
-        return max(1, min(position_size, max_size))
+        self.logger.info(f"Risk calculation: risk_amount=${risk_amount:.2f}, "
+                        f"risk_per_share=${risk_per_share:.2f}, calculated_size={calculated_size}")
+        
+        # Apply position limits - for MNQ, max 5 contracts
+        max_size = self.system_config.risk_management.max_position_size
+        
+        # Don't use buying power calculation for futures - it's misleading
+        final_size = max(1, min(calculated_size, max_size))
+        
+        self.logger.info(f"Final position size: {final_size} (max allowed: {max_size})")
+        
+        return final_size
     
     def should_trade(self, market_data: MarketData) -> bool:
         """Check if conditions are suitable for trading."""

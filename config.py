@@ -41,7 +41,7 @@ class NetworkConfig:
 class RiskManagementConfig:
     """Shared risk management configuration."""
     max_position_size: int = 5
-    risk_per_trade: float = 0.25
+    risk_per_trade: float = 0.02  # 2% per trade (reasonable for futures)
     stop_loss_atr_multiplier: float = 2.0
     min_confidence: float = 0.6
 
