@@ -121,65 +121,102 @@ class TechnicalIndicators:
         if len(true_ranges) < period:
             return np.mean(true_ranges) if true_ranges else 0.01
         
-        atr14 = np.mean(true_ranges[-period:])
+        # Apply Wilder's smoothing (proper ATR calculation)
+        # Wilder's EMA: alpha = 1/period, more conservative than standard EMA
+        alpha = 1.0 / period
+        atr = true_ranges[0]  # Initialize with first TR value
         
-        # Sanity check: ATR14 should match manual calculation of last 14 true ranges
-        if period == 14 and len(true_ranges) >= 14:
-            last14_tr = true_ranges[-14:]
-            manual_atr14 = np.mean(last14_tr)
-            assert abs(atr14 - manual_atr14) < 1e-6, f"ATR14 sanity check failed: {atr14} != {manual_atr14}"
+        for tr in true_ranges[1:]:
+            atr = alpha * tr + (1 - alpha) * atr
         
-        return atr14
+        # Sanity check: ATR should be reasonable
+        assert not np.isnan(atr), f"ATR calculation resulted in NaN"
+        assert atr > 0, f"ATR must be positive, got {atr}"
+        
+        return atr
     
     @staticmethod
     def calculate_atr_from_closes(prices: List[float], period: int = 14) -> float:
-        """Calculate ATR approximation using only close prices (fallback method).
+        """Calculate ATR approximation using only close prices (fallback method for MNQ).
+        
+        This method provides realistic ATR estimates for MNQ futures when proper OHLC data
+        is unavailable. It combines inter-bar price changes with estimated intrabar ranges
+        based on MNQ's typical volatility characteristics.
         
         Args:
             prices: List of close prices
             period: ATR calculation period
             
         Returns:
-            Approximated ATR value
+            Approximated ATR value suitable for MNQ futures
         """
         if len(prices) < 2:
-            return prices[0] * 0.01 if prices else 0.01
+            return prices[0] * 0.0015 if prices else 30.0  # Default ~$30 for MNQ
         
-        true_ranges = []
+        current_price = prices[-1]
+        
+        # Calculate basic price changes
+        price_changes = []
         for i in range(1, len(prices)):
-            close_prev = prices[i-1]
-            close_curr = prices[i]
+            change = abs(prices[i] - prices[i-1])
+            price_changes.append(change)
+        
+        if not price_changes:
+            return current_price * 0.0015  # 0.15% fallback
+        
+        # Enhanced True Range estimation for MNQ futures
+        true_ranges = []
+        
+        # Calculate rolling volatility for adaptive scaling
+        recent_changes = price_changes[-min(20, len(price_changes)):]
+        avg_change = np.mean(recent_changes) if recent_changes else 0
+        vol_multiplier = max(1.0, min(3.0, np.std(recent_changes) / max(avg_change, 0.1)))
+        
+        for i in range(len(price_changes)):
+            price = prices[i + 1]  # Current bar price
+            price_change = price_changes[i]  # Inter-bar change
             
-            # MNQ-specific True Range approximation
-            price_change = abs(close_curr - close_prev)
+            # MNQ-specific intrabar range estimation
+            # Base: MNQ typically has 0.10-0.20% intrabar range in normal conditions
+            base_intrabar_range = price * 0.0015  # 0.15% baseline
             
-            # Base intrabar range for MNQ (typically 0.05-0.15% of price)
-            base_range = close_curr * 0.0008  # 0.08% baseline
+            # Volatility adjustment: scale based on recent price action
+            volatility_adjusted_range = base_intrabar_range * vol_multiplier
             
-            # Gap component (inter-bar price change)
+            # Gap component: inter-bar price movement
             gap_component = price_change
             
-            # True Range = max of gap and typical intrabar range
-            # Cap at reasonable levels for MNQ
-            estimated_range = min(max(base_range, gap_component), close_curr * 0.002)  # Cap at 0.2%
+            # For MNQ, True Range is typically the larger of:
+            # 1. Intrabar range (estimated from volatility)
+            # 2. Inter-bar gap (actual price change between closes)
+            estimated_tr = max(volatility_adjusted_range, gap_component)
             
-            true_ranges.append(estimated_range)
+            # Apply realistic bounds for MNQ:
+            # Minimum: $15 (0.08% of ~$19,000)
+            # Typical: $25-45 (0.13-0.23% of ~$19,000)
+            # Maximum: $75 (0.4% of ~$19,000 in high volatility)
+            min_atr = max(15.0, price * 0.0008)  # Minimum $15 or 0.08%
+            max_atr = min(75.0, price * 0.004)   # Maximum $75 or 0.4%
+            
+            estimated_tr = max(min_atr, min(estimated_tr, max_atr))
+            true_ranges.append(estimated_tr)
         
         if len(true_ranges) < period:
-            return np.mean(true_ranges) if true_ranges else 0.01
+            # Not enough data - use recent average
+            avg_tr = np.mean(true_ranges) if true_ranges else current_price * 0.0015
+            return max(20.0, min(avg_tr, current_price * 0.003))  # Bounds: $20-0.3%
         
-        # Use exponential smoothing like proper ATR (Wilder's smoothing)
-        if len(true_ranges) >= period:
-            # Start with simple average of first 'period' values
-            atr = np.mean(true_ranges[:period])
-            
-            # Apply Wilder's smoothing to remaining values
-            for tr in true_ranges[period:]:
-                atr = ((atr * (period - 1)) + tr) / period
-            
-            return atr
-        else:
-            return np.mean(true_ranges[-period:])
+        # Apply Wilder's smoothing (proper ATR calculation)
+        atr = np.mean(true_ranges[:period])  # Initial ATR
+        
+        # Apply Wilder's exponential smoothing to remaining values
+        for tr in true_ranges[period:]:
+            atr = ((atr * (period - 1)) + tr) / period
+        
+        # Final bounds check for MNQ
+        final_atr = max(20.0, min(atr, current_price * 0.003))
+        
+        return final_atr
     
     @staticmethod
     def calculate_vwap(prices: List[float], volumes: List[float], 

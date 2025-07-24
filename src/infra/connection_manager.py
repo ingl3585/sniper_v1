@@ -135,53 +135,49 @@ class ConnectionManager:
         """Load historical data into PriceHistoryManager."""
         timeframes = ['1m', '5m', '15m', '30m', '1h']
         
+        # Accumulate all bars for all timeframes first
+        accumulated_data = {
+            'price_1m': [],
+            'price_5m': [],
+            'price_15m': [],
+            'price_30m': [],
+            'price_1h': [],
+            'volume_1m': [],
+            'volume_5m': [],
+            'volume_15m': [],
+            'volume_30m': [],
+            'volume_1h': []
+        }
+        
         for timeframe in timeframes:
             bars_key = f'bars_{timeframe}'
             if bars_key in historical_data:
                 bars = historical_data[bars_key]
                 self.logger.info(f"Loading {len(bars)} bars for {timeframe}")
                 
+                # Accumulate all bars for this timeframe
                 for bar in bars:
-                    # Create MarketData object for each historical bar
-                    market_data = self._create_market_data_from_bar(bar, timeframe)
-                    if market_data:
-                        self.price_history_manager.update_from_market_data(market_data)
-    
-    def _create_market_data_from_bar(self, bar: Dict[str, Any], timeframe: str):
-        """Create MarketData object from historical bar data."""
-        try:
-            # Initialize with zeros for all timeframes
-            price_data = {
-                'price_1m': [],
-                'price_5m': [],
-                'price_15m': [],
-                'price_30m': [],
-                'price_1h': [],
-                'volume_1m': [],
-                'volume_5m': [],
-                'volume_15m': [],
-                'volume_30m': [],
-                'volume_1h': []
-            }
-            
-            # Set the specific timeframe data
-            price_data[f'price_{timeframe}'] = [bar.get('close', 0)]
-            price_data[f'volume_{timeframe}'] = [bar.get('volume', 0)]
-            
+                    accumulated_data[f'price_{timeframe}'].append(bar.get('close', 0))
+                    accumulated_data[f'volume_{timeframe}'].append(bar.get('volume', 0))
+        
+        # Create single MarketData object with all accumulated historical data
+        if any(len(data) > 0 for data in accumulated_data.values()):
             from src.infra.nt_bridge import MarketData
-            return MarketData(
-                current_price=bar.get('close', 0),
-                account_balance=0,  # Not available in historical data
+            market_data = MarketData(
+                current_price=0,  # Not relevant for historical data load
+                account_balance=0,
                 buying_power=0,
                 daily_pnl=0,
                 unrealized_pnl=0,
                 open_positions=0,
-                timestamp=int(bar.get('timestamp', int(time.time() * 1000))),  # Use bar timestamp or current time
-                **price_data
+                timestamp=int(time.time() * 1000),
+                **accumulated_data
             )
-        except Exception as e:
-            self.logger.error(f"Error creating MarketData from bar: {e}")
-            return None
+            
+            # Single call to update with all historical data
+            self.price_history_manager.update_from_market_data(market_data)
+            self.logger.info("Historical data successfully loaded into PriceHistoryManager")
+    
     
     def stop_bridge(self):
         """Stop the TCP bridge."""

@@ -27,12 +27,10 @@ class MomentumStrategy(BaseStrategy):
     def generate_signal(self, market_data: MarketData) -> Optional[Signal]:
         """Generate momentum signal based on EMA crossovers and trend strength."""
         if not self.should_trade(market_data):
-            self.logger.info("Momentum: should_trade() returned False")
             return None
         
-        # Update price and volume history
+        # Update price and volume history (no logging needed)
         self.update_price_history(market_data)
-        self.logger.info("Momentum: Updated price history, checking data sufficiency...")
         
         # Check if we have any data for analysis (no hard requirements)
         if self.price_history_manager.get_data_length('1h') < 10:

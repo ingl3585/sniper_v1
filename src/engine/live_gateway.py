@@ -230,18 +230,34 @@ class ExecutionEngine:
         """
         # Calculate position size if not specified
         position_size = signal.size
+        
+        # Debug logging for position sizing
+        self.logger.info(f"Position sizing debug: signal.size={signal.size}, "
+                        f"account_balance={market_data.account_balance}, "
+                        f"buying_power={market_data.buying_power}, "
+                        f"entry_price={signal.entry_price}, stop_price={signal.stop_price}")
+        
         if position_size == 1 and signal.stop_price:
             # Calculate risk-based position size
             risk_per_share = abs(signal.entry_price - signal.stop_price)
-            max_risk = market_data.account_balance * self.config.risk_management.risk_per_trade
-            position_size = int(max_risk / risk_per_share) if risk_per_share > 0 else 1
             
-            # Apply position limits
-            max_size = min(
-                self.config.risk_management.max_position_size,
-                int(market_data.buying_power / (signal.entry_price * 100))
-            )
-            position_size = max(1, min(position_size, max_size))
+            # For futures like MNQ, use a default account size if balance is 0 or unavailable
+            account_balance = market_data.account_balance
+            if account_balance <= 0:
+                account_balance = 50000.0  # Default $50K account for MNQ
+                self.logger.info(f"Using default account balance: ${account_balance}")
+            
+            max_risk = account_balance * self.config.risk_management.risk_per_trade
+            calculated_size = int(max_risk / risk_per_share) if risk_per_share > 0 else 1
+            
+            self.logger.info(f"Risk calculation: max_risk=${max_risk:.2f}, "
+                            f"risk_per_share=${risk_per_share:.2f}, calculated_size={calculated_size}")
+            
+            # Apply position limits - for MNQ, max 5 contracts  
+            max_size = self.config.risk_management.max_position_size
+            position_size = max(1, min(calculated_size, max_size))
+            
+            self.logger.info(f"Final position size: {position_size} (max allowed: {max_size})")
         
         return TradeSignal(
             action=signal.action,

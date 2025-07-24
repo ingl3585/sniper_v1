@@ -28,24 +28,18 @@ class MeanReversionStrategy(BaseStrategy):
         if not self.should_trade(market_data):
             return None
         
-        # Check for significant price changes
+        # Check for significant price changes (only log meaningful changes)
         has_change, change_info = self.has_significant_price_change(market_data)
-        if has_change:
+        if has_change and not change_info.startswith("Price unchanged") and not change_info.startswith("Stale data"):
             self.logger.info(f"Price Update: {change_info}")
         
-        # Check data freshness
-        freshness = market_data.get_data_freshness_warning()
-        if has_change:
-            self.logger.info(f"Data freshness: {freshness}")
-        
-        # Update price and volume history
+        # Update price and volume history (no logging needed)
         self.update_price_history(market_data)
-        if has_change:
-            self.logger.info("Updated price history, checking data sufficiency")
         
         # Check if we have any data for analysis (no hard requirements)
         if self.price_history_manager.get_data_length('5m') < 10:
-            if has_change or self.should_log_detailed_analysis():
+            # Only log data waiting message every 30 seconds, not on every tick
+            if self.should_log_detailed_analysis():
                 current_5m_length = self.price_history_manager.get_data_length('5m')
                 self.logger.info(f"Waiting for more 5m data - have {current_5m_length}")
             return None

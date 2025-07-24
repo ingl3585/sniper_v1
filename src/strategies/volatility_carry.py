@@ -25,11 +25,18 @@ class VolatilityCarryStrategy(BaseStrategy):
         self.vol_term_structure = {}  # Store volatility term structure
         self.carry_history = []  # Track carry opportunities
         self.last_carry_signal = None
+        self.last_signal_time = None  # Track last signal time for rate limiting
+        self.signal_cooldown_minutes = 5  # Minimum 5 minutes between signals
         self.carry_threshold_breached = False
         
     def generate_signal(self, market_data: MarketData) -> Optional[Signal]:
         """Generate volatility carry signal."""
         try:
+            # Check signal cooldown to prevent spam
+            if self.last_signal_time:
+                time_since_last = datetime.now() - self.last_signal_time
+                if time_since_last.total_seconds() < (self.signal_cooldown_minutes * 60):
+                    return None
             # Update price history first
             self.update_price_history(market_data)
             
@@ -60,6 +67,11 @@ class VolatilityCarryStrategy(BaseStrategy):
                 return None
                 
             self.logger.info(f"VolCarry: {['HOLD', 'BUY', 'SELL'][primary_signal.action]} @ {primary_signal.confidence:.2f}")
+            
+            # Update signal tracking for rate limiting
+            self.last_signal_time = datetime.now()
+            self.last_carry_signal = primary_signal
+            
             return primary_signal
             
         except Exception as e:
@@ -118,36 +130,24 @@ class VolatilityCarryStrategy(BaseStrategy):
                 signal_strength = min(overall_slope / self.config.contango_threshold, 2.0)
                 confidence = min(0.5 + signal_strength * 0.2, 0.9)
                 
-                # Calculate stop and target using proper ATR with OHLC data
+                # Calculate ATR using improved fallback method
                 atr_ohlc = self.price_history_manager.calculate_atr('15m', period=14, length=50)
                 atr_closes = TechnicalIndicators.calculate_atr_from_closes(market_data.price_15m[-20:]) if len(market_data.price_15m) >= 20 else 0.0
                 
-                # Use OHLC ATR if available, otherwise fall back to close-based
-                atr = atr_ohlc if atr_ohlc > 0 else (atr_closes if atr_closes > 0 else current_price * 0.01)
+                # Use OHLC ATR if available and realistic, otherwise use improved close-based method
+                if atr_ohlc > 0 and atr_ohlc >= (current_price * 0.0008):  # OHLC ATR is realistic
+                    atr = atr_ohlc
+                    atr_method = "OHLC"
+                else:
+                    atr = atr_closes if atr_closes > 0 else (current_price * 0.0015)
+                    atr_method = "Closes"
                 
-                # Enhanced ATR debugging
+                # Enhanced ATR debugging  
                 recent_prices = market_data.price_15m[-5:] if len(market_data.price_15m) >= 5 else market_data.price_15m
                 price_range = max(recent_prices) - min(recent_prices) if recent_prices else 0
                 atr_percent = (atr / current_price * 100) if current_price > 0 else 0
                 
-                # Check OHLC data availability
-                ohlc_bars = self.price_history_manager.get_data_length('15m')
-                highs_available = len(self.price_history_manager.get_highs('15m', 5)) if ohlc_bars > 0 else 0
-                lows_available = len(self.price_history_manager.get_lows('15m', 5)) if ohlc_bars > 0 else 0
-                
-                self.logger.info(f"ATR Analysis: OHLC=${atr_ohlc:.2f}, Closes=${atr_closes:.2f}, Used=${atr:.2f} ({atr_percent:.3f}%)")
-                self.logger.info(f"Data: {ohlc_bars} bars, {highs_available}H/{lows_available}L, Range=${price_range:.2f}, Current=${current_price:.2f}")
-                
-                # Dynamic ATR validation and capping
-                min_atr = current_price * 0.001  # 0.1% of price (minimum)
-                max_atr = current_price * 0.0025  # 0.25% of price (maximum for MNQ)
-                reasonable_atr = current_price * 0.0015  # 0.15% of price (typical for MNQ)
-                
-                if atr < min_atr or atr > max_atr:
-                    original_atr = atr
-                    original_percent = (original_atr / current_price * 100)
-                    atr = reasonable_atr
-                    self.logger.warning(f"ATR out of range: ${original_atr:.2f} ({original_percent:.3f}%) → ${atr:.2f} (0.15%)")
+                self.logger.info(f"ATR: {atr_method}=${atr:.2f} ({atr_percent:.3f}%), Range=${price_range:.2f}, Price=${current_price:.2f}")
                 
                 stop_price = current_price + (atr * self.system_config.risk_management.stop_loss_atr_multiplier)
                 target_price = current_price - (atr * self.config.target_atr_multiplier)
@@ -166,36 +166,24 @@ class VolatilityCarryStrategy(BaseStrategy):
                 signal_strength = min(abs(overall_slope) / self.config.backwardation_threshold, 2.0)
                 confidence = min(0.5 + signal_strength * 0.2, 0.9)
                 
-                # Calculate stop and target using proper ATR with OHLC data
+                # Calculate ATR using improved fallback method
                 atr_ohlc = self.price_history_manager.calculate_atr('15m', period=14, length=50)
                 atr_closes = TechnicalIndicators.calculate_atr_from_closes(market_data.price_15m[-20:]) if len(market_data.price_15m) >= 20 else 0.0
                 
-                # Use OHLC ATR if available, otherwise fall back to close-based
-                atr = atr_ohlc if atr_ohlc > 0 else (atr_closes if atr_closes > 0 else current_price * 0.01)
+                # Use OHLC ATR if available and realistic, otherwise use improved close-based method
+                if atr_ohlc > 0 and atr_ohlc >= (current_price * 0.0008):  # OHLC ATR is realistic
+                    atr = atr_ohlc
+                    atr_method = "OHLC"
+                else:
+                    atr = atr_closes if atr_closes > 0 else (current_price * 0.0015)
+                    atr_method = "Closes"
                 
-                # Enhanced ATR debugging
+                # Enhanced ATR debugging  
                 recent_prices = market_data.price_15m[-5:] if len(market_data.price_15m) >= 5 else market_data.price_15m
                 price_range = max(recent_prices) - min(recent_prices) if recent_prices else 0
                 atr_percent = (atr / current_price * 100) if current_price > 0 else 0
                 
-                # Check OHLC data availability
-                ohlc_bars = self.price_history_manager.get_data_length('15m')
-                highs_available = len(self.price_history_manager.get_highs('15m', 5)) if ohlc_bars > 0 else 0
-                lows_available = len(self.price_history_manager.get_lows('15m', 5)) if ohlc_bars > 0 else 0
-                
-                self.logger.info(f"ATR Analysis: OHLC=${atr_ohlc:.2f}, Closes=${atr_closes:.2f}, Used=${atr:.2f} ({atr_percent:.3f}%)")
-                self.logger.info(f"Data: {ohlc_bars} bars, {highs_available}H/{lows_available}L, Range=${price_range:.2f}, Current=${current_price:.2f}")
-                
-                # Dynamic ATR validation and capping
-                min_atr = current_price * 0.001  # 0.1% of price (minimum)
-                max_atr = current_price * 0.0025  # 0.25% of price (maximum for MNQ)
-                reasonable_atr = current_price * 0.0015  # 0.15% of price (typical for MNQ)
-                
-                if atr < min_atr or atr > max_atr:
-                    original_atr = atr
-                    original_percent = (original_atr / current_price * 100)
-                    atr = reasonable_atr
-                    self.logger.warning(f"ATR out of range: ${original_atr:.2f} ({original_percent:.3f}%) → ${atr:.2f} (0.15%)")
+                self.logger.info(f"ATR: {atr_method}=${atr:.2f} ({atr_percent:.3f}%), Range=${price_range:.2f}, Price=${current_price:.2f}")
                 
                 stop_price = current_price - (atr * self.system_config.risk_management.stop_loss_atr_multiplier)
                 target_price = current_price + (atr * self.config.target_atr_multiplier)
