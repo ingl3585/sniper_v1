@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from sklearn.preprocessing import StandardScaler
 from sklearn.model_selection import train_test_split
 import lightgbm as lgb
+from logging_config import get_logger
 from src.infra.nt_bridge import MarketData
 
 
@@ -31,7 +32,7 @@ class MetaAllocator:
     """ML-based meta-allocator for strategy selection."""
     
     def __init__(self, model_path: str = "data/meta_allocator_model.pkl", config=None):
-        from src.config import MetaAllocatorConfig
+        from config import MetaAllocatorConfig
         if config is None:
             config = MetaAllocatorConfig()
             
@@ -42,6 +43,8 @@ class MetaAllocator:
         self.is_trained = False
         self.feature_history = []
         self.performance_history = []
+        self.logger = get_logger(__name__)
+        self.logger.set_context(component='meta_allocator')
         
         # Model parameters from config
         self.lookback_period = config.lookback_period
@@ -181,7 +184,220 @@ class MetaAllocator:
         features['bid_ask_spread_proxy'] = volatility_value * 0.1  # Approximate
         features['market_impact_proxy'] = features['position_size'] * features['volatility_realized']
         
+        # FVDR (Flow-Vol Drift Ratio) features for momentum assessment
+        fvdr_features = self._extract_fvdr_features(market_data)
+        features.update(fvdr_features)
+        
+        # NFVGS (Normalized Fair Value Gap Strength) features for gap analysis
+        nfvgs_features = self._extract_nfvgs_features(market_data)
+        features.update(nfvgs_features)
+        
         return features
+    
+    def _extract_fvdr_features(self, market_data: MarketData) -> Dict[str, float]:
+        """Extract FVDR-based features for the ML model.
+        
+        Args:
+            market_data: Current market data
+            
+        Returns:
+            Dictionary of FVDR-related features
+        """
+        features = {
+            'fvdr_1h': 0.0,
+            'fvdr_30m': 0.0,
+            'fvdr_15m': 0.0,
+            'fvdr_momentum_strength': 0.0,
+            'fvdr_momentum_direction': 0.0
+        }
+        
+        try:
+            from src.strategies.technical_indicators import TechnicalIndicators
+            
+            # Calculate FVDR for different timeframes
+            timeframes = [
+                ('1h', market_data.price_1h, market_data.volume_1h),
+                ('30m', market_data.price_30m, market_data.volume_30m),
+                ('15m', market_data.price_15m, market_data.volume_15m)
+            ]
+            
+            for tf_name, prices, volumes in timeframes:
+                if not prices or not volumes or len(prices) < 15:
+                    continue
+                    
+                # Generate synthetic order flow from price/volume data
+                buys, sells = self._estimate_order_flow(prices, volumes)
+                highs, lows = self._estimate_ohlc_from_closes(prices)
+                
+                try:
+                    fvdr_values = TechnicalIndicators.calculate_fvdr(
+                        buys=buys,
+                        sells=sells,
+                        highs=highs,
+                        lows=lows,
+                        closes=prices,
+                        atr_period=14
+                    )
+                    
+                    if len(fvdr_values) > 0:
+                        current_fvdr = fvdr_values[-1]
+                        features[f'fvdr_{tf_name}'] = current_fvdr
+                        
+                        # Set momentum strength and direction from 1h FVDR
+                        if tf_name == '1h':
+                            features['fvdr_momentum_strength'] = abs(current_fvdr)
+                            features['fvdr_momentum_direction'] = 1.0 if current_fvdr > 0 else -1.0 if current_fvdr < 0 else 0.0
+                            
+                except Exception as e:
+                    self.logger.debug(f"FVDR calculation failed for {tf_name}: {e}")
+                    
+        except Exception as e:
+            self.logger.error(f"Error extracting FVDR features: {e}")
+            
+        return features
+    
+    def _extract_nfvgs_features(self, market_data: MarketData) -> Dict[str, float]:
+        """Extract NFVGS-based features for the ML model.
+        
+        Args:
+            market_data: Current market data
+            
+        Returns:
+            Dictionary of NFVGS-related features
+        """
+        features = {
+            'nfvgs_15m': 0.0,
+            'nfvgs_30m': 0.0,
+            'nfvgs_gap_strength': 0.0,
+            'nfvgs_gap_direction': 0.0,
+            'nfvgs_gap_exhaustion_risk': 0.0
+        }
+        
+        try:
+            from src.strategies.technical_indicators import TechnicalIndicators
+            
+            # Calculate NFVGS for timeframes suitable for gap analysis
+            timeframes = [
+                ('15m', market_data.price_15m),
+                ('30m', market_data.price_30m)
+            ]
+            
+            for tf_name, prices in timeframes:
+                if not prices or len(prices) < 18:  # Need 14 + 4 for ATR + gap detection
+                    continue
+                    
+                # Estimate highs/lows from close prices
+                highs, lows = self._estimate_ohlc_from_closes(prices)
+                
+                try:
+                    nfvgs_values = TechnicalIndicators.calculate_nfvgs(
+                        highs=highs,
+                        lows=lows,
+                        closes=prices,
+                        atr_period=14,
+                        decay_ema=5
+                    )
+                    
+                    if len(nfvgs_values) > 0:
+                        current_nfvgs = nfvgs_values[-1]
+                        features[f'nfvgs_{tf_name}'] = current_nfvgs
+                        
+                        # Set gap analysis features from 15m NFVGS
+                        if tf_name == '15m':
+                            features['nfvgs_gap_strength'] = abs(current_nfvgs)
+                            features['nfvgs_gap_direction'] = 1.0 if current_nfvgs > 0 else -1.0 if current_nfvgs < 0 else 0.0
+                            
+                            # Gap exhaustion risk (higher values suggest potential reversal)
+                            features['nfvgs_gap_exhaustion_risk'] = min(1.0, abs(current_nfvgs) / 2.0)
+                            
+                except Exception as e:
+                    self.logger.debug(f"NFVGS calculation failed for {tf_name}: {e}")
+                    
+        except Exception as e:
+            self.logger.error(f"Error extracting NFVGS features: {e}")
+            
+        return features
+    
+    def _estimate_order_flow(self, prices: list, volumes: list) -> Tuple[list, list]:
+        """Estimate buy/sell volume from price action and volume.
+        
+        Args:
+            prices: List of close prices
+            volumes: List of volumes
+            
+        Returns:
+            Tuple of (buys, sells) volume estimates
+        """
+        buys = []
+        sells = []
+        
+        for i in range(len(prices)):
+            vol = volumes[i]
+            
+            if i == 0:
+                # First bar: assume balanced
+                buy_ratio = 0.5
+            else:
+                # Estimate buy/sell ratio based on price change
+                price_change = prices[i] - prices[i-1]
+                price_change_pct = price_change / prices[i-1] if prices[i-1] > 0 else 0
+                
+                if price_change > 0:
+                    # Up bar: more buying (55-80% based on magnitude)
+                    buy_ratio = 0.55 + min(0.25, abs(price_change_pct) * 50)
+                elif price_change < 0:
+                    # Down bar: more selling (20-45% buying based on magnitude)  
+                    buy_ratio = 0.45 - min(0.25, abs(price_change_pct) * 50)
+                else:
+                    # No change: balanced
+                    buy_ratio = 0.5
+            
+            buy_vol = vol * buy_ratio
+            sell_vol = vol * (1 - buy_ratio)
+            buys.append(buy_vol)
+            sells.append(sell_vol)
+            
+        return buys, sells
+    
+    def _estimate_ohlc_from_closes(self, closes: list) -> Tuple[list, list]:
+        """Estimate high/low from close prices for indicator calculations.
+        
+        Args:
+            closes: List of close prices
+            
+        Returns:
+            Tuple of (highs, lows) estimates
+        """
+        highs = []
+        lows = []
+        
+        for i in range(len(closes)):
+            close = closes[i]
+            
+            if i == 0:
+                # First bar: assume close = high = low
+                highs.append(close)
+                lows.append(close)
+            else:
+                # Estimate intrabar range based on previous close and current close
+                prev_close = closes[i-1]
+                price_change = abs(close - prev_close)
+                
+                # Assume intrabar range is 1.5x the inter-bar change, capped at 1% of price
+                estimated_range = min(price_change * 1.5, close * 0.01)
+                
+                # High/low around the close price
+                high = close + estimated_range * 0.6
+                low = close - estimated_range * 0.4
+                
+                # Ensure high is at least current close and low is at most current close
+                high = max(high, close, prev_close)
+                low = min(low, close, prev_close)
+                
+                highs.append(high)
+                lows.append(low)
+                
+        return highs, lows
     
     def _calculate_trend_strength(self, prices: list) -> float:
         """Calculate trend strength indicator."""
@@ -350,7 +566,7 @@ class MetaAllocator:
             targets = self.performance_history
         
         if len(feature_data) < 100:
-            print("Insufficient data for training")
+            self.logger.warning("Insufficient data for training")
             return
         
         # Convert to DataFrame
@@ -388,7 +604,7 @@ class MetaAllocator:
         train_score = self.model.score(X_train, y_train)
         test_score = self.model.score(X_test, y_test)
         
-        print(f"Model trained - Train score: {train_score:.3f}, Test score: {test_score:.3f}")
+        self.logger.info(f"Model trained - Train score: {train_score:.3f}, Test score: {test_score:.3f}")
         
         self.is_trained = True
         
@@ -398,8 +614,58 @@ class MetaAllocator:
     def _retrain_model(self):
         """Retrain model with recent data."""
         if len(self.feature_history) >= 200:
-            print("Retraining meta-allocator model...")
+            self.logger.info("Retraining meta-allocator model...")
             self.train_model()
+    
+    def force_retrain_with_new_features(self):
+        """Force model retraining with updated feature set including FVDR and NFVGS.
+        
+        This method should be called after adding new indicators to ensure
+        the model incorporates the latest feature enhancements.
+        """
+        self.logger.info("Force retraining meta-allocator with updated feature set (FVDR + NFVGS)")
+        
+        # Clear any cached model state to force fresh training
+        self.model = None
+        self.scaler = None
+        
+        # If we have sufficient historical data, retrain immediately
+        if len(self.feature_history) >= 100:
+            self.logger.info(f"Retraining with {len(self.feature_history)} historical feature vectors")
+            
+            # Ensure all historical features have the new FVDR/NFVGS keys with default values
+            updated_history = []
+            for feature_dict in self.feature_history:
+                # Add missing FVDR features with default values
+                fvdr_defaults = {
+                    'fvdr_1h': 0.0,
+                    'fvdr_30m': 0.0, 
+                    'fvdr_15m': 0.0,
+                    'fvdr_momentum_strength': 0.0,
+                    'fvdr_momentum_direction': 0.0
+                }
+                
+                # Add missing NFVGS features with default values
+                nfvgs_defaults = {
+                    'nfvgs_15m': 0.0,
+                    'nfvgs_30m': 0.0,
+                    'nfvgs_gap_strength': 0.0,
+                    'nfvgs_gap_direction': 0.0,
+                    'nfvgs_gap_exhaustion_risk': 0.0
+                }
+                
+                # Create updated feature dict with defaults for missing keys
+                updated_features = {**fvdr_defaults, **nfvgs_defaults, **feature_dict}
+                updated_history.append(updated_features)
+            
+            self.feature_history = updated_history
+            self.train_model()
+            
+        else:
+            self.logger.warning(f"Insufficient historical data for retraining: {len(self.feature_history)} < 100")
+            self.logger.info("Model will retrain automatically once sufficient data is collected")
+        
+        self.logger.info("Force retrain completed - model ready for enhanced predictions")
     
     def _save_model(self):
         """Save trained model to disk."""
@@ -416,7 +682,7 @@ class MetaAllocator:
         with open(self.model_path, 'wb') as f:
             pickle.dump(model_data, f)
         
-        print(f"Model saved to {self.model_path}")
+        self.logger.info(f"Model saved to {self.model_path}")
     
     def _load_model(self):
         """Load trained model from disk."""
@@ -431,9 +697,9 @@ class MetaAllocator:
                 self.feature_history = model_data.get('feature_history', [])
                 self.performance_history = model_data.get('performance_history', [])
                 
-                print(f"Model loaded from {self.model_path}")
+                self.logger.info(f"Model loaded from {self.model_path}")
             except Exception as e:
-                print(f"Error loading model: {e}")
+                self.logger.error(f"Error loading model: {e}")
                 self.is_trained = False
     
     def get_model_info(self) -> Dict[str, Any]:

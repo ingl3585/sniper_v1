@@ -5,10 +5,12 @@ Fades 2-3σ moves away from VWAP on 5m and 15m timeframes.
 from typing import Optional
 from datetime import datetime
 import numpy as np
-import logging
+import time
 from src.strategies.base_strategy import BaseStrategy, Signal
 from src.infra.nt_bridge import MarketData
-from src.config import MeanReversionConfig
+from config import MeanReversionConfig
+from src.strategies.technical_indicators import TechnicalIndicators
+from constants import StrategyConstants, TechnicalAnalysisConstants, TradingConstants, RISK
 
 
 class MeanReversionStrategy(BaseStrategy):
@@ -18,46 +20,52 @@ class MeanReversionStrategy(BaseStrategy):
         
         super().__init__("MeanReversion", config, system_config, price_history_manager)
         self.config: MeanReversionConfig = config
-        self.logger = logging.getLogger(__name__)
         self.vwap_history = []
         self.last_trade_time = None  # Track last trade time for rate limiting
     
     def generate_signal(self, market_data: MarketData) -> Optional[Signal]:
         """Generate mean reversion signal based on VWAP deviation."""
         if not self.should_trade(market_data):
-            self.logger.info("Mean Reversion: should_trade() returned False")
             return None
+        
+        # Check for significant price changes
+        has_change, change_info = self.has_significant_price_change(market_data)
+        if has_change:
+            self.logger.info(f"Price Update: {change_info}")
         
         # Check data freshness
         freshness = market_data.get_data_freshness_warning()
-        self.logger.info(f"Mean Reversion: {freshness}")
+        if has_change:
+            self.logger.info(f"Data freshness: {freshness}")
         
         # Update price and volume history
         self.update_price_history(market_data)
-        self.logger.info("Mean Reversion: Updated price history, checking data sufficiency...")
+        if has_change:
+            self.logger.info("Updated price history, checking data sufficiency")
         
-        # Check if we have sufficient data for analysis
-        if not self.price_history_manager.has_sufficient_data('5m', self.config.vwap_period):
-            current_5m_length = self.price_history_manager.get_data_length('5m')
-            self.logger.info(f"Mean Reversion: Insufficient 5m data - need {self.config.vwap_period}, have {current_5m_length}")
+        # Check if we have any data for analysis (no hard requirements)
+        if self.price_history_manager.get_data_length('5m') < 10:
+            if has_change or self.should_log_detailed_analysis():
+                current_5m_length = self.price_history_manager.get_data_length('5m')
+                self.logger.info(f"Waiting for more 5m data - have {current_5m_length}")
             return None
         
         # Calculate VWAP and deviation for 5m timeframe
         prices_5m = self.price_history_manager.get_prices('5m')
         volumes_5m = self.price_history_manager.get_volumes('5m')
-        signal_5m = self._analyze_timeframe(prices_5m, volumes_5m, "5m")
+        signal_5m = self._analyze_timeframe(prices_5m, volumes_5m, "5m", has_change)
         
         # Calculate VWAP and deviation for 15m timeframe
         signal_15m = None
-        if self.price_history_manager.has_sufficient_data('15m', self.config.vwap_period):
+        if self.price_history_manager.get_data_length('15m') >= 10:
             prices_15m = self.price_history_manager.get_prices('15m')
             volumes_15m = self.price_history_manager.get_volumes('15m')
-            signal_15m = self._analyze_timeframe(prices_15m, volumes_15m, "15m")
+            signal_15m = self._analyze_timeframe(prices_15m, volumes_15m, "15m", has_change)
         
         # Analyze 1m timeframe for confirmation if enabled
         signal_1m = None
         if (self.config.enable_1m_confirmation and 
-            self.price_history_manager.has_sufficient_data('1m', self.config.vwap_period)):
+            self.price_history_manager.get_data_length('1m') >= 10):
             prices_1m = self.price_history_manager.get_prices('1m')
             volumes_1m = self.price_history_manager.get_volumes('1m')
             signal_1m = self._analyze_1m_confirmation(prices_1m, volumes_1m, "1m")
@@ -71,10 +79,10 @@ class MeanReversionStrategy(BaseStrategy):
         return final_signal
     
     
-    def _analyze_timeframe(self, prices: list, volumes: list, timeframe: str) -> Optional[Signal]:
+    def _analyze_timeframe(self, prices: list, volumes: list, timeframe: str, has_price_change: bool = False) -> Optional[Signal]:
         """Analyze a specific timeframe for mean reversion opportunities."""
-        if len(prices) < self.config.vwap_period or len(volumes) < self.config.vwap_period:
-            self.logger.info(f"{timeframe}: Insufficient data - need {self.config.vwap_period}, have {len(prices)} prices, {len(volumes)} volumes")
+        # Validate input data
+        if not self._validate_timeframe_data(prices, volumes, timeframe):
             return None
         
         current_price = prices[-1]
@@ -85,7 +93,51 @@ class MeanReversionStrategy(BaseStrategy):
             self.logger.debug(f"{timeframe}: Volume too low - {current_volume:.0f} < {self.config.min_volume_threshold}")
             return None
         
-        # Calculate VWAP for the period
+        # Calculate and validate VWAP
+        vwap_data = self._calculate_and_validate_vwap(prices, volumes, timeframe)
+        if not vwap_data:
+            return None
+        
+        vwap, vwap_prices, vwap_volumes = vwap_data
+        
+        # Calculate deviation metrics
+        deviation_data = self._calculate_deviation_metrics(prices, vwap, timeframe)
+        if not deviation_data:
+            return None
+        
+        z_score, current_deviation, std_dev = deviation_data
+        
+        # Calculate technical indicators
+        rsi = self.calculate_rsi(prices, period=self.system_config.technical_analysis.rsi_period, debug=self.config.rsi_debug_logging)
+        atr = self._calculate_atr_for_stops(prices)
+        
+        # Log analysis details
+        self._log_analysis_details(timeframe, current_price, current_volume, len(prices), len(volumes), 
+                                 vwap_prices, vwap_volumes, vwap, current_deviation, std_dev, z_score, 
+                                 rsi, atr, prices, has_price_change)
+        
+        # Check signal conditions
+        oversold, overbought = self._check_signal_conditions(z_score, rsi, current_volume, timeframe)
+        
+        # Generate signal based on conditions
+        signal = None
+        if oversold:
+            signal = self._create_buy_signal(current_price, vwap, atr, z_score, rsi, timeframe)
+        elif overbought:
+            signal = self._create_sell_signal(current_price, vwap, atr, z_score, rsi, timeframe)
+        
+        return signal
+    
+    def _validate_timeframe_data(self, prices: list, volumes: list, timeframe: str) -> bool:
+        """Validate input data for timeframe analysis."""
+        if len(prices) < 10 or len(volumes) < 10:  # Just need basic data
+            if self.should_log_detailed_analysis():
+                self.logger.info(f"{timeframe}: Waiting for more data - have {len(prices)} prices, {len(volumes)} volumes")
+            return False
+        return True
+    
+    def _calculate_and_validate_vwap(self, prices: list, volumes: list, timeframe: str) -> Optional[tuple]:
+        """Calculate VWAP and perform validation checks."""
         vwap_prices = prices[-self.config.vwap_period:]
         vwap_volumes = volumes[-self.config.vwap_period:]
         
@@ -95,7 +147,7 @@ class MeanReversionStrategy(BaseStrategy):
             self.logger.warning(f"{timeframe}: VWAP calculation returned 0")
             return None
         
-        # Detailed VWAP validation logging
+        # VWAP validation logging
         total_pv = sum(p * v for p, v in zip(vwap_prices, vwap_volumes))
         total_volume = sum(vwap_volumes)
         manual_vwap = total_pv / total_volume if total_volume > 0 else 0
@@ -112,7 +164,7 @@ class MeanReversionStrategy(BaseStrategy):
         if abs(vwap - simple_avg) / simple_avg > 0.05:
             self.logger.warning(f"{timeframe}: VWAP ${vwap:.2f} differs significantly from simple average ${simple_avg:.2f}")
         
-        # Check for volume concentration (detect if few bars dominate)
+        # Check for volume concentration
         max_volume = max(vwap_volumes)
         if max_volume > total_volume * 0.5:
             self.logger.warning(f"{timeframe}: Single bar dominates volume - max: {max_volume:.0f} vs total: {total_volume:.0f}")
@@ -122,7 +174,10 @@ class MeanReversionStrategy(BaseStrategy):
         top_3_weights = sorted(volume_weights, reverse=True)[:3]
         self.logger.info(f"  Top 3 Volume Weights: {[f'{w:.1%}' for w in top_3_weights]}")
         
-        # Calculate price deviation from VWAP
+        return vwap, vwap_prices, vwap_volumes
+    
+    def _calculate_deviation_metrics(self, prices: list, vwap: float, timeframe: str) -> Optional[tuple]:
+        """Calculate price deviation metrics from VWAP."""
         price_deviations = [(p - vwap) / vwap for p in prices[-self.config.vwap_period:]]
         std_dev = np.std(price_deviations)
         
@@ -130,25 +185,32 @@ class MeanReversionStrategy(BaseStrategy):
             self.logger.warning(f"{timeframe}: Standard deviation is 0")
             return None
         
+        current_price = prices[-1]
         current_deviation = (current_price - vwap) / vwap
         z_score = current_deviation / std_dev
         
-        # Calculate RSI for additional confirmation (configurable period)
-        rsi = self.calculate_rsi(prices, period=self.system_config.technical_analysis.rsi_period, debug=self.config.rsi_debug_logging)
-        
-        # Calculate ATR for stop loss
+        return z_score, current_deviation, std_dev
+    
+    def _calculate_atr_for_stops(self, prices: list) -> float:
+        """Calculate ATR for stop loss calculations."""
         atr_period = min(self.system_config.technical_analysis.atr_period, len(prices))
-        atr = self.calculate_atr_simple(prices[-atr_period:])
-        
-        # Log all calculated values with detailed breakdown
+        return self.calculate_atr_simple(prices[-atr_period:])
+    
+    def _log_analysis_details(self, timeframe: str, current_price: float, current_volume: float,
+                            num_prices: int, num_volumes: int, vwap_prices: list, vwap_volumes: list,
+                            vwap: float, current_deviation: float, std_dev: float, z_score: float,
+                            rsi: float, atr: float, prices: list, has_price_change: bool = False):
+        """Log detailed analysis information (rate limited or on price change)."""
+        # Only log detailed analysis periodically or on significant price changes
+        if not (has_price_change or self.should_log_detailed_analysis()):
+            return
+            
         self.logger.info(f"=== {timeframe} Mean Reversion Analysis ===")
         self.logger.info(f"Current Price: ${current_price:.2f}")
         self.logger.info(f"Current Volume: {current_volume:.0f}")
-        self.logger.info(f"Data Points: {len(prices)} prices, {len(volumes)} volumes")
+        self.logger.info(f"Data Points: {num_prices} prices, {num_volumes} volumes")
         
-        # VWAP calculation details
-        vwap_prices = prices[-self.config.vwap_period:]
-        vwap_volumes = volumes[-self.config.vwap_period:]
+        # VWAP details
         self.logger.info(f"VWAP Period: {self.config.vwap_period} bars")
         self.logger.info(f"VWAP Price Range: ${min(vwap_prices):.2f} - ${max(vwap_prices):.2f}")
         self.logger.info(f"VWAP Volume Range: {min(vwap_volumes):.0f} - {max(vwap_volumes):.0f}")
@@ -160,15 +222,15 @@ class MeanReversionStrategy(BaseStrategy):
         self.logger.info(f"Standard Deviation: {std_dev:.6f}")
         self.logger.info(f"Z-Score: {z_score:.3f}")
         
-        # RSI detailed calculation logging for validation
+        # RSI details
         self.logger.info(f"RSI Calculation Details:")
         smoothing_method = "Wilder's exponential smoothing" if self.config.rsi_use_wilder_smoothing else "Simple average"
         self.logger.info(f"RSI Period: {self.system_config.technical_analysis.rsi_period} bars ({smoothing_method})")
         self.logger.info(f"RSI Price Range: ${min(prices):.2f} - ${max(prices):.2f}")
         
-        # Add detailed RSI debugging for troubleshooting
-        if len(prices) >= 15:  # Need at least 15 for 14-period RSI
-            recent_prices = prices[-5:]  # Last 5 prices for context
+        # RSI debugging
+        if len(prices) >= 15:
+            recent_prices = prices[-5:]
             deltas = [recent_prices[i] - recent_prices[i-1] for i in range(1, len(recent_prices))]
             self.logger.info(f"Last 5 prices: {[f'${p:.2f}' for p in recent_prices]}")
             self.logger.info(f"Last 4 price changes: {[f'{d:+.2f}' for d in deltas]}")
@@ -180,9 +242,12 @@ class MeanReversionStrategy(BaseStrategy):
         self.logger.info(f"Calculated RSI: {rsi:.2f}")
         
         # ATR details
+        atr_period = min(self.system_config.technical_analysis.atr_period, len(prices))
         self.logger.info(f"ATR Period: {atr_period} bars")
         self.logger.info(f"Calculated ATR: ${atr:.2f}")
-        
+    
+    def _check_signal_conditions(self, z_score: float, rsi: float, current_volume: float, timeframe: str) -> tuple:
+        """Check oversold/overbought signal conditions."""
         # Threshold checks
         self.logger.info(f"Thresholds Check:")
         self.logger.info(f"Z-Score {z_score:.3f} vs ±{self.config.deviation_threshold}")
@@ -192,79 +257,75 @@ class MeanReversionStrategy(BaseStrategy):
         # Signal conditions
         oversold = z_score < -self.config.deviation_threshold and rsi < self.config.rsi_oversold
         overbought = z_score > self.config.deviation_threshold and rsi > self.config.rsi_overbought
+        
         self.logger.info(f"Signal Conditions:")
         self.logger.info(f"Oversold: {oversold} (z < -{self.config.deviation_threshold} AND rsi < {self.config.rsi_oversold})")
         self.logger.info(f"Overbought: {overbought} (z > {self.config.deviation_threshold} AND rsi > {self.config.rsi_overbought})")
         
-        # Mean reversion signals
-        signal = None
+        return oversold, overbought
+    
+    def _create_buy_signal(self, current_price: float, vwap: float, atr: float, 
+                          z_score: float, rsi: float, timeframe: str) -> Signal:
+        """Create a buy signal for oversold conditions."""
+        stop_price = current_price - (atr * RISK.STOP_LOSS_ATR_MULTIPLIER)
+        target_price = vwap  # Target is VWAP re-touch
         
-        # Oversold condition: price significantly below VWAP
-        if (z_score < -self.config.deviation_threshold and 
-            rsi < self.config.rsi_oversold):
-            
-            stop_price = current_price - (atr * self.system_config.risk_management.stop_loss_atr_multiplier)
-            target_price = vwap  # Target is VWAP re-touch
-            
-            # Scale confidence based on how much z-score exceeds threshold
-            excess_z = abs(z_score) - self.config.deviation_threshold
-            base_confidence = 0.6 + (excess_z / 2.0) * 0.35
-            
-            # Add RSI contribution (stronger RSI = higher confidence)
-            rsi_distance = abs(rsi - 50)  # Distance from neutral (50)
-            rsi_factor = 1.0 + (rsi_distance / 50) * 0.1  # Up to 10% boost for extreme RSI
-            
-            confidence = min(0.95, base_confidence * rsi_factor)
-            
-            # Log confidence calculation details for validation
-            self.logger.info(f"Confidence Calculation (BUY): z_score={z_score:.3f}, excess_z={excess_z:.3f}, base_confidence={base_confidence:.3f}, rsi_distance={rsi_distance:.1f}, rsi_factor={rsi_factor:.3f}, final_confidence={confidence:.3f}")
-            
-            signal = Signal(
-                action=1,  # Buy
-                confidence=confidence,
-                entry_price=current_price,
-                stop_price=stop_price,
-                target_price=target_price,
-                reason=f"Mean reversion buy {timeframe}: z-score={z_score:.2f}, RSI={rsi:.1f}",
-                timestamp=datetime.now()
-            )
+        # Calculate confidence
+        confidence = self._calculate_signal_confidence(z_score, rsi, "BUY")
         
-        # Overbought condition: price significantly above VWAP
-        elif (z_score > self.config.deviation_threshold and 
-              rsi > self.config.rsi_overbought):
-            
-            stop_price = current_price + (atr * self.system_config.risk_management.stop_loss_atr_multiplier)
-            target_price = vwap  # Target is VWAP re-touch
-            
-            # Scale confidence based on how much z-score exceeds threshold
-            excess_z = abs(z_score) - self.config.deviation_threshold
-            base_confidence = 0.6 + (excess_z / 2.0) * 0.35
-            
-            # Add RSI contribution (stronger RSI = higher confidence)
-            rsi_distance = abs(rsi - 50)  # Distance from neutral (50)
-            rsi_factor = 1.0 + (rsi_distance / 50) * 0.1  # Up to 10% boost for extreme RSI
-            
-            confidence = min(0.95, base_confidence * rsi_factor)
-            
-            # Log confidence calculation details for validation
-            self.logger.info(f"Confidence Calculation (SELL): z_score={z_score:.3f}, excess_z={excess_z:.3f}, base_confidence={base_confidence:.3f}, rsi_distance={rsi_distance:.1f}, rsi_factor={rsi_factor:.3f}, final_confidence={confidence:.3f}")
-            
-            signal = Signal(
-                action=2,  # Sell
-                confidence=confidence,
-                entry_price=current_price,
-                stop_price=stop_price,
-                target_price=target_price,
-                reason=f"Mean reversion sell {timeframe}: z-score={z_score:.2f}, RSI={rsi:.1f}",
-                timestamp=datetime.now()
-            )
+        return Signal(
+            action=1,  # Buy
+            confidence=confidence,
+            entry_price=current_price,
+            stop_price=stop_price,
+            target_price=target_price,
+            reason=f"Mean reversion buy {timeframe}: z-score={z_score:.2f}, RSI={rsi:.1f}",
+            timestamp=datetime.now()
+        )
+    
+    def _create_sell_signal(self, current_price: float, vwap: float, atr: float,
+                           z_score: float, rsi: float, timeframe: str) -> Signal:
+        """Create a sell signal for overbought conditions."""
+        stop_price = current_price + (atr * RISK.STOP_LOSS_ATR_MULTIPLIER)
+        target_price = vwap  # Target is VWAP re-touch
         
-        return signal
+        # Calculate confidence
+        confidence = self._calculate_signal_confidence(z_score, rsi, "SELL")
+        
+        return Signal(
+            action=2,  # Sell
+            confidence=confidence,
+            entry_price=current_price,
+            stop_price=stop_price,
+            target_price=target_price,
+            reason=f"Mean reversion sell {timeframe}: z-score={z_score:.2f}, RSI={rsi:.1f}",
+            timestamp=datetime.now()
+        )
+    
+    def _calculate_signal_confidence(self, z_score: float, rsi: float, direction: str) -> float:
+        """Calculate signal confidence based on z-score and RSI strength."""
+        # Scale confidence based on how much z-score exceeds threshold
+        excess_z = abs(z_score) - self.config.deviation_threshold
+        base_confidence = StrategyConstants.CONFIDENCE_BASE + (excess_z / 2.0) * StrategyConstants.CONFIDENCE_Z_SCORE_MULTIPLIER
+        
+        # Add RSI contribution (stronger RSI = higher confidence)
+        rsi_distance = abs(rsi - TechnicalAnalysisConstants.RSI_NEUTRAL)
+        rsi_factor = 1.0 + (rsi_distance / StrategyConstants.RSI_DISTANCE_MAX) * StrategyConstants.RSI_CONFIDENCE_BOOST_MAX
+        
+        confidence = min(TradingConstants.MAX_SIGNAL_CONFIDENCE, base_confidence * rsi_factor)
+        
+        # Log confidence calculation details
+        self.logger.info(f"Confidence Calculation ({direction}): z_score={z_score:.3f}, excess_z={excess_z:.3f}, "
+                        f"base_confidence={base_confidence:.3f}, rsi_distance={rsi_distance:.1f}, "
+                        f"rsi_factor={rsi_factor:.3f}, final_confidence={confidence:.3f}")
+        
+        return confidence
     
     def _analyze_1m_confirmation(self, prices: list, volumes: list, timeframe: str) -> Optional[dict]:
         """Analyze 1m timeframe for signal confirmation (not independent signals)."""
-        if len(prices) < self.config.vwap_period or len(volumes) < self.config.vwap_period:
-            self.logger.info(f"{timeframe}: Insufficient data for confirmation - need {self.config.vwap_period}, have {len(prices)} prices")
+        if len(prices) < 10 or len(volumes) < 10:  # Just need basic data
+            if self.should_log_detailed_analysis():
+                self.logger.info(f"{timeframe}: Waiting for more data for confirmation - have {len(prices)} prices")
             return None
         
         current_price = prices[-1]
@@ -400,6 +461,12 @@ class MeanReversionStrategy(BaseStrategy):
             self.logger.info(f"Primary signal confidence {primary_signal.confidence:.3f} below minimum {self.system_config.risk_management.min_confidence}")
             return None
         
+        # NFVGS filter: disable signal generation when abs(nfvgs) > 0.5
+        nfvgs_value = self._calculate_nfvgs_filter(market_data)
+        if abs(nfvgs_value) > 0.5:
+            self.logger.info(f"Mean reversion signal disabled by NFVGS filter: {nfvgs_value:.3f} (abs > 0.5)")
+            return None
+        
         # Check rate limiting
         if not self._check_rate_limiting():
             return None
@@ -460,6 +527,49 @@ class MeanReversionStrategy(BaseStrategy):
         self.logger.info(f"1m confirmation passed, confidence boosted by {confidence_boost:.3f}")
         return True
     
+    def _calculate_nfvgs_filter(self, market_data: MarketData) -> float:
+        """Calculate NFVGS value for signal filtering.
+        
+        Args:
+            market_data: Current market data
+            
+        Returns:
+            NFVGS value (positive = bullish gaps, negative = bearish gaps)
+        """
+        try:
+            # Use 15m timeframe for NFVGS calculation (good balance of responsiveness and stability)
+            highs_15m = self.price_history_manager.get_highs('15m')
+            lows_15m = self.price_history_manager.get_lows('15m')
+            closes_15m = self.price_history_manager.get_prices('15m')
+            
+            # Need at least 18 bars for NFVGS calculation (14 for ATR + 4 for gap detection)
+            if len(closes_15m) < 18 or len(highs_15m) < 18 or len(lows_15m) < 18:
+                self.logger.debug(f"Insufficient data for NFVGS: {len(closes_15m)} bars (need 18)")
+                return 0.0
+            
+            # Calculate NFVGS using the technical indicators service
+            nfvgs_values = TechnicalIndicators.calculate_nfvgs(
+                highs=highs_15m,
+                lows=lows_15m,
+                closes=closes_15m,
+                atr_period=14,
+                decay_ema=5  
+            )
+            
+            if len(nfvgs_values) == 0:
+                return 0.0
+            
+            # Use the latest NFVGS value
+            current_nfvgs = nfvgs_values[-1]
+            
+            self.logger.info(f"NFVGS filter calculation: current={current_nfvgs:.4f}")
+            
+            return current_nfvgs
+            
+        except Exception as e:
+            self.logger.error(f"Error calculating NFVGS filter: {e}")
+            return 0.0
+    
     def get_strategy_metrics(self) -> dict:
         """Get strategy-specific metrics."""
         base_metrics = super().get_strategy_metrics()
@@ -472,7 +582,7 @@ class MeanReversionStrategy(BaseStrategy):
             'current_vwap_5m': self.calculate_vwap(
                 self.price_history_manager.get_prices('5m', self.config.vwap_period),
                 self.price_history_manager.get_volumes('5m', self.config.vwap_period)
-            ) if self.price_history_manager.has_sufficient_data('5m', self.config.vwap_period) else 0
+            ) if self.price_history_manager.get_data_length('5m') >= self.config.vwap_period else 0
         })
         
         return base_metrics

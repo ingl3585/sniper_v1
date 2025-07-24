@@ -3,11 +3,12 @@ Signal Processing Engine
 Handles strategy signal generation, allocation, and execution decisions.
 """
 from typing import Optional, Tuple
-import logging
+import time
 from src.infra.nt_bridge import MarketData, TradeSignal
 from src.strategies.base_strategy import Signal
-from src.models.meta_allocator import MetaAllocator, AllocationDecision
-from src.models.ppo_execution import PPOExecutionAgent, ExecutionDecision
+from src.engine.meta_allocator import MetaAllocator, AllocationDecision
+from src.engine.live_gateway import ExecutionEngine, ExecutionDecision
+from logging_config import get_logger
 
 
 class SignalProcessor:
@@ -19,13 +20,19 @@ class SignalProcessor:
         self.vol_carry = vol_carry
         self.vol_breakout = vol_breakout
         self.meta_allocator = meta_allocator
-        self.execution_agent = execution_agent
         self.config = config
-        self.logger = logging.getLogger(__name__)
+        self.logger = get_logger(__name__)
+        self.logger.set_context(component='signal_processor')
+        self.last_no_signal_log = 0  # Rate limit "no signal" messages
+        
+        # Initialize execution engine
+        self.execution_engine = ExecutionEngine(config, execution_agent)
     
-    def process_market_data(self, market_data: MarketData) -> Optional[TradeSignal]:
+    def process_market_data(self, market_data: MarketData, is_realtime_tick: bool = False) -> Optional[TradeSignal]:
         """Process market data and generate trading signals."""
-        # Processing signals
+        # Processing signals (real-time mode suppresses verbose logging)
+        if not is_realtime_tick:
+            self.logger.info("Processing signals")
         
         # Generate signals from all strategies
         signals = {}
@@ -58,20 +65,29 @@ class SignalProcessor:
         # Get allocation decision
         allocation = self._get_allocation_decision(market_data, signals)
         # Meta allocation computed
+        if not is_realtime_tick:
+            self.logger.debug("Meta allocation completed")
         
         # Select best signal
-        final_signal = self._select_final_signal(signals, allocation)
+        final_signal = self._select_final_signal(signals, allocation, is_realtime_tick)
         
         if final_signal:
-            trade_signal = self._convert_to_trade_signal(final_signal, market_data)
-            self.logger.info(f"Final Trade Signal: Action={trade_signal.action}, "
-                           f"Size={trade_signal.position_size}, "
-                           f"Confidence={trade_signal.confidence:.3f}")
-            self.logger.info("=== Signal Processing End ===")
-            return trade_signal
+            trade_signal = self.execution_engine.execute_signal(final_signal, market_data)
+            if trade_signal:
+                self.logger.info(f"Final Trade Signal: Action={trade_signal.action}, "
+                               f"Size={trade_signal.position_size}, "
+                               f"Confidence={trade_signal.confidence:.3f}")
+                self.logger.info("=== Signal Processing End ===")
+                return trade_signal
         else:
-            self.logger.info("Final Signal: None - No trading action")
-            self.logger.info("=== Signal Processing End ===")
+            # Rate limit "no signal" messages to avoid spam
+            current_time = time.time()
+            if current_time - self.last_no_signal_log > 300:  # Log every 5 minutes
+                self.logger.info("Final Signal: None - No trading action")
+                self.last_no_signal_log = current_time
+            # Always log processing end for debugging
+            if not is_realtime_tick:
+                self.logger.info("=== Signal Processing End ===")
         
         return None
     
@@ -88,16 +104,18 @@ class SignalProcessor:
             self.logger.error(f"Error getting allocation decision: {e}")
             return None
     
-    def _select_final_signal(self, signals: dict, allocation):
+    def _select_final_signal(self, signals: dict, allocation, is_realtime_tick: bool = False):
         """Select final signal based on allocation and signal strength."""
         if not signals:
+            self.logger.debug("No signals generated")
             return None
         
         # Default equal weighting if no allocation
         if not allocation:
             # Select signal with highest confidence
             best_signal = max(signals.items(), key=lambda x: x[1].confidence)
-            self.logger.info(f"Selected {best_signal[0]} signal with confidence {best_signal[1].confidence:.2f} (equal weights)")
+            if not is_realtime_tick:
+                self.logger.info(f"Selected {best_signal[0]} signal with confidence {best_signal[1].confidence:.2f} (equal weights)")
             return best_signal[1]
         
         # Use allocation weights
@@ -124,54 +142,32 @@ class SignalProcessor:
         
         # Select signal with highest weighted score
         best_signal = max(weighted_signals, key=lambda x: x[1].confidence * x[2])
-        self.logger.info(f"Selected {best_signal[0]} signal with confidence {best_signal[1].confidence:.2f} and weight {best_signal[2]:.2f}")
+        if not is_realtime_tick:
+            self.logger.info(f"Selected {best_signal[0]} signal with confidence {best_signal[1].confidence:.2f} and weight {best_signal[2]:.2f}")
         
         return best_signal[1]
     
     def _convert_to_trade_signal(self, signal: Signal, market_data: MarketData) -> TradeSignal:
-        """Convert strategy signal to trade signal."""
+        """Convert strategy signal to trade signal - delegated to ExecutionEngine."""
+        # This method is now handled by ExecutionEngine.execute_signal()
+        # Keeping for backward compatibility
         if hasattr(signal, 'confidence') and hasattr(signal, 'action'):
             return self.mean_reversion.create_trade_signal(signal, market_data)
         return signal
     
     def get_execution_decision(self, trade_signal: TradeSignal, market_data: MarketData) -> Optional[ExecutionDecision]:
-        """Get execution decision from RL agent or force market orders."""
-        # Check if market orders are forced
-        if self.config and self.config.trading.force_market_orders:
-            self.logger.info("FORCE_MARKET_ORDERS enabled - using market orders only")
-            return ExecutionDecision(
-                order_type="market",
-                limit_offset=0.0,
-                confidence=1.0,
-                expected_slippage=0.001,  # Small expected slippage for market orders
-                urgency_score=1.0
-            )
-        
-        # Use RL agent if available and not forced to market orders
-        if not self.execution_agent:
-            self.logger.info("No execution agent - defaulting to market orders")
-            return ExecutionDecision(
-                order_type="market",
-                limit_offset=0.0,
-                confidence=0.8,
-                expected_slippage=0.001,
-                urgency_score=0.8
-            )
-        
-        try:
-            urgency = min(1.0, trade_signal.confidence + market_data.volatility)
-            decision = self.execution_agent.get_execution_decision(
-                market_data, trade_signal.position_size, urgency
-            )
-            self.logger.info(f"RL execution decision: {decision.order_type}")
-            return decision
-        except Exception as e:
-            self.logger.error(f"Error getting execution decision: {e} - defaulting to market order")
-            return ExecutionDecision(
-                order_type="market",
-                limit_offset=0.0,
-                confidence=0.5,
-                expected_slippage=0.001,
-                urgency_score=0.5
-            )
+        """Get execution decision - delegated to ExecutionEngine."""
+        return self.execution_engine.get_execution_decision(trade_signal, market_data)
+    
+    def cleanup(self):
+        """Cleanup signal processor resources."""
+        if hasattr(self, 'execution_engine'):
+            self.execution_engine.cleanup()
+        self.logger.info("SignalProcessor: Cleanup complete")
+    
+    def get_execution_metrics(self):
+        """Get execution metrics from the execution engine."""
+        if hasattr(self, 'execution_engine'):
+            return self.execution_engine.get_execution_metrics()
+        return {}
     

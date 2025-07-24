@@ -2,14 +2,15 @@
 Volatility Carry Strategy
 Trades volatility term structure and carry opportunities.
 """
-import logging
+from logging_config import get_logger
 from typing import Optional, Dict, Any
 from datetime import datetime, timedelta
 import numpy as np
 
 from src.strategies.base_strategy import BaseStrategy, Signal
 from src.infra.nt_bridge import MarketData
-from src.config import SystemConfig
+from config import SystemConfig
+from src.strategies.technical_indicators import TechnicalIndicators
 
 
 class VolatilityCarryStrategy(BaseStrategy):
@@ -18,7 +19,7 @@ class VolatilityCarryStrategy(BaseStrategy):
     def __init__(self, config, system_config: SystemConfig, price_history_manager=None):
         super().__init__("VolatilityCarry", config, system_config, price_history_manager)
         self.config = config
-        self.logger = logging.getLogger(__name__)
+        self.logger = get_logger(__name__)
         
         # Carry tracking
         self.vol_term_structure = {}  # Store volatility term structure
@@ -66,21 +67,17 @@ class VolatilityCarryStrategy(BaseStrategy):
             return None
     
     def _has_sufficient_data(self) -> bool:
-        """Check if we have sufficient data for analysis."""
+        """Check if we have any data for analysis."""
         status = self.price_history_manager.get_status()
         
-        # Need at least 100 data points for each timeframe for term structure analysis
-        required_data = {
-            '5m': 100,  # 8+ hours
-            '15m': 100,  # 25+ hours  
-            '1h': 100    # 4+ days
-        }
+        # Check if we have any basic data (no hard requirements)
+        timeframes_to_check = ['5m', '15m', '1h']
         
-        for timeframe, required in required_data.items():
-            if status.get(timeframe, {}).get('data_points', 0) < required:
-                return False
+        for timeframe in timeframes_to_check:
+            if status.get(timeframe, {}).get('data_points', 0) > 10:
+                return True
         
-        return True
+        return False
     
     def _analyze_term_structure(self, market_data: MarketData) -> Optional[Signal]:
         """Analyze volatility term structure for carry opportunities."""
@@ -122,12 +119,24 @@ class VolatilityCarryStrategy(BaseStrategy):
                 confidence = min(0.5 + signal_strength * 0.2, 0.9)
                 
                 # Calculate stop and target using proper ATR with OHLC data
-                atr = self.price_history_manager.calculate_atr('15m', period=14, length=50)
-                if atr == 0.0:  # Fallback if no OHLC data available
-                    atr = self.calculate_atr_simple(market_data.price_15m[-20:]) if len(market_data.price_15m) >= 20 else current_price * 0.01
+                atr_ohlc = self.price_history_manager.calculate_atr('15m', period=14, length=50)
+                atr_closes = TechnicalIndicators.calculate_atr_from_closes(market_data.price_15m[-20:]) if len(market_data.price_15m) >= 20 else 0.0
                 
-                # Debug ATR calculation
-                self.logger.info(f"VolCarry ATR Debug: ATR={atr:.2f}, Current=${current_price:.2f}")
+                # Use OHLC ATR if available, otherwise fall back to close-based
+                atr = atr_ohlc if atr_ohlc > 0 else (atr_closes if atr_closes > 0 else current_price * 0.01)
+                
+                # Enhanced ATR debugging
+                recent_prices = market_data.price_15m[-5:] if len(market_data.price_15m) >= 5 else market_data.price_15m
+                price_range = max(recent_prices) - min(recent_prices) if recent_prices else 0
+                atr_percent = (atr / current_price * 100) if current_price > 0 else 0
+                
+                # Check OHLC data availability
+                ohlc_bars = self.price_history_manager.get_data_length('15m')
+                highs_available = len(self.price_history_manager.get_highs('15m', 5)) if ohlc_bars > 0 else 0
+                lows_available = len(self.price_history_manager.get_lows('15m', 5)) if ohlc_bars > 0 else 0
+                
+                self.logger.info(f"ATR Analysis: OHLC=${atr_ohlc:.2f}, Closes=${atr_closes:.2f}, Used=${atr:.2f} ({atr_percent:.3f}%)")
+                self.logger.info(f"Data: {ohlc_bars} bars, {highs_available}H/{lows_available}L, Range=${price_range:.2f}, Current=${current_price:.2f}")
                 
                 # Dynamic ATR validation and capping
                 min_atr = current_price * 0.001  # 0.1% of price (minimum)
@@ -136,8 +145,9 @@ class VolatilityCarryStrategy(BaseStrategy):
                 
                 if atr < min_atr or atr > max_atr:
                     original_atr = atr
+                    original_percent = (original_atr / current_price * 100)
                     atr = reasonable_atr
-                    self.logger.warning(f"VolCarry: ATR out of range (${original_atr:.2f}), using ${atr:.2f} (0.15% of price)")
+                    self.logger.warning(f"ATR out of range: ${original_atr:.2f} ({original_percent:.3f}%) → ${atr:.2f} (0.15%)")
                 
                 stop_price = current_price + (atr * self.system_config.risk_management.stop_loss_atr_multiplier)
                 target_price = current_price - (atr * self.config.target_atr_multiplier)
@@ -157,12 +167,24 @@ class VolatilityCarryStrategy(BaseStrategy):
                 confidence = min(0.5 + signal_strength * 0.2, 0.9)
                 
                 # Calculate stop and target using proper ATR with OHLC data
-                atr = self.price_history_manager.calculate_atr('15m', period=14, length=50)
-                if atr == 0.0:  # Fallback if no OHLC data available
-                    atr = self.calculate_atr_simple(market_data.price_15m[-20:]) if len(market_data.price_15m) >= 20 else current_price * 0.01
+                atr_ohlc = self.price_history_manager.calculate_atr('15m', period=14, length=50)
+                atr_closes = TechnicalIndicators.calculate_atr_from_closes(market_data.price_15m[-20:]) if len(market_data.price_15m) >= 20 else 0.0
                 
-                # Debug ATR calculation
-                self.logger.info(f"VolCarry ATR Debug: ATR={atr:.2f}, Current=${current_price:.2f}")
+                # Use OHLC ATR if available, otherwise fall back to close-based
+                atr = atr_ohlc if atr_ohlc > 0 else (atr_closes if atr_closes > 0 else current_price * 0.01)
+                
+                # Enhanced ATR debugging
+                recent_prices = market_data.price_15m[-5:] if len(market_data.price_15m) >= 5 else market_data.price_15m
+                price_range = max(recent_prices) - min(recent_prices) if recent_prices else 0
+                atr_percent = (atr / current_price * 100) if current_price > 0 else 0
+                
+                # Check OHLC data availability
+                ohlc_bars = self.price_history_manager.get_data_length('15m')
+                highs_available = len(self.price_history_manager.get_highs('15m', 5)) if ohlc_bars > 0 else 0
+                lows_available = len(self.price_history_manager.get_lows('15m', 5)) if ohlc_bars > 0 else 0
+                
+                self.logger.info(f"ATR Analysis: OHLC=${atr_ohlc:.2f}, Closes=${atr_closes:.2f}, Used=${atr:.2f} ({atr_percent:.3f}%)")
+                self.logger.info(f"Data: {ohlc_bars} bars, {highs_available}H/{lows_available}L, Range=${price_range:.2f}, Current=${current_price:.2f}")
                 
                 # Dynamic ATR validation and capping
                 min_atr = current_price * 0.001  # 0.1% of price (minimum)
@@ -171,8 +193,9 @@ class VolatilityCarryStrategy(BaseStrategy):
                 
                 if atr < min_atr or atr > max_atr:
                     original_atr = atr
+                    original_percent = (original_atr / current_price * 100)
                     atr = reasonable_atr
-                    self.logger.warning(f"VolCarry: ATR out of range (${original_atr:.2f}), using ${atr:.2f} (0.15% of price)")
+                    self.logger.warning(f"ATR out of range: ${original_atr:.2f} ({original_percent:.3f}%) → ${atr:.2f} (0.15%)")
                 
                 stop_price = current_price - (atr * self.system_config.risk_management.stop_loss_atr_multiplier)
                 target_price = current_price + (atr * self.config.target_atr_multiplier)

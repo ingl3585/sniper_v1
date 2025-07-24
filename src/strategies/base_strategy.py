@@ -7,11 +7,14 @@ from typing import Dict, Any, Optional, List
 from dataclasses import dataclass
 from datetime import datetime
 import numpy as np
+import time
 from src.infra.nt_bridge import MarketData, TradeSignal
-from src.utils.price_history_manager import PriceHistoryManager
+from storage import PriceHistoryManager
+from src.strategies.technical_indicators import TechnicalIndicators
+from logging_config import get_logger
 
 
-# StrategyConfig removed - using centralized config from src.config
+# StrategyConfig removed - using centralized config from src.core.config
 
 
 @dataclass
@@ -38,95 +41,99 @@ class BaseStrategy(ABC):
         self.last_signal_time = None
         self.atr_values = []
         self.price_history_manager = price_history_manager or PriceHistoryManager(system_config)
+        self.logger = get_logger(f"strategies.{name.lower()}")
+        self.logger.set_context(strategy=name.lower(), component='strategy')
+        self.last_detailed_log_time = 0  # Rate limit detailed analysis logs
+        self.log_interval = 60  # Log detailed analysis every 60 seconds
+        
+        # Price change tracking
+        self.last_price = None
+        self.last_timestamp = None
+        self.price_unchanged_count = 0
+        self.significant_price_change_threshold = 0.25  # $0.25 for MNQ
         
     @abstractmethod
     def generate_signal(self, market_data: MarketData) -> Optional[Signal]:
         """Generate trading signal based on market data."""
         pass
     
+    def should_log_detailed_analysis(self) -> bool:
+        """Check if enough time has passed to log detailed analysis."""
+        current_time = time.time()
+        if current_time - self.last_detailed_log_time > self.log_interval:
+            self.last_detailed_log_time = current_time
+            self._enable_detailed_logging = True
+            return True
+        self._enable_detailed_logging = False
+        return False
+    
+    def log_if_enabled(self, message: str, level: str = "info"):
+        """Log message only if detailed logging is currently enabled."""
+        if getattr(self, '_enable_detailed_logging', False):
+            getattr(self.logger, level)(message)
+    
+    def log_detailed_if_time(self, message: str, level: str = "info"):
+        """Log detailed analysis only if enough time has passed."""
+        if self.should_log_detailed_analysis():
+            getattr(self.logger, level)(message)
+    
+    def has_significant_price_change(self, market_data: MarketData) -> tuple[bool, str]:
+        """Check if price has changed significantly since last check."""
+        current_price = market_data.current_price
+        current_timestamp = market_data.timestamp
+        
+        if self.last_price is None:
+            self.last_price = current_price
+            self.last_timestamp = current_timestamp
+            return True, f"Initial price: ${current_price:.2f}"
+        
+        price_change = abs(current_price - self.last_price)
+        time_change = current_timestamp - self.last_timestamp if self.last_timestamp else 0
+        
+        # Check for significant price movement
+        if price_change >= self.significant_price_change_threshold:
+            direction = "↑" if current_price > self.last_price else "↓"
+            change_info = f"Price {direction} ${self.last_price:.2f} → ${current_price:.2f} (${price_change:.2f})"
+            self.last_price = current_price
+            self.last_timestamp = current_timestamp
+            self.price_unchanged_count = 0
+            return True, change_info
+        
+        # Check for timestamp advancement (data freshness)
+        elif time_change > 1000:  # More than 1 second
+            self.last_timestamp = current_timestamp
+            self.price_unchanged_count += 1
+            if self.price_unchanged_count % 10 == 0:  # Log every 10th unchanged tick
+                return True, f"Price static at ${current_price:.2f} ({self.price_unchanged_count} ticks)"
+            return False, f"Price unchanged: ${current_price:.2f}"
+        
+        # Price and time unchanged - possible stale data
+        else:
+            self.price_unchanged_count += 1
+            if self.price_unchanged_count % 20 == 0:  # Log every 20th stale tick
+                return True, f"⚠️ Possible stale data: ${current_price:.2f} ({self.price_unchanged_count} identical ticks)"
+            return False, f"Stale data: ${current_price:.2f}"
+    
     def update_price_history(self, market_data: MarketData):
         """Update price history using centralized manager."""
         self.price_history_manager.update_from_market_data(market_data)
     
     def calculate_atr(self, high_prices: List[float], low_prices: List[float], 
-                     close_prices: List[float], period: int = 10) -> float:
+                     close_prices: List[float], period: int = 14) -> float:
         """Calculate Average True Range using proper True Range formula."""
-        if len(high_prices) < period + 1 or len(low_prices) < period + 1 or len(close_prices) < period + 1:
-            return 0.0
-        
-        true_ranges = []
-        for i in range(1, min(len(high_prices), len(low_prices), len(close_prices))):
-            # True Range = max(H-L, |H-Cp|, |L-Cp|) where Cp = previous close
-            high_low = high_prices[i] - low_prices[i]
-            high_close_prev = abs(high_prices[i] - close_prices[i-1])
-            low_close_prev = abs(low_prices[i] - close_prices[i-1])
-            true_range = max(high_low, high_close_prev, low_close_prev)
-            true_ranges.append(true_range)
-        
-        if len(true_ranges) < period:
-            return np.mean(true_ranges) if true_ranges else 0.0
-        
-        return np.mean(true_ranges[-period:])
+        return TechnicalIndicators.calculate_atr(high_prices, low_prices, close_prices, period)
     
     def calculate_ema(self, prices: List[float], period: int) -> float:
         """Calculate Exponential Moving Average."""
-        if len(prices) < period:
-            return np.mean(prices)
-        
-        multiplier = 2 / (period + 1)
-        
-        # Start with SMA of first 'period' prices (proper EMA initialization)
-        ema = np.mean(prices[:period])
-        
-        # Apply EMA formula to remaining prices
-        for price in prices[period:]:
-            ema = (price * multiplier) + (ema * (1 - multiplier))
-        
-        # Optional validation logging for debugging
-        if hasattr(self, 'logger') and hasattr(self, 'config') and hasattr(self.config, 'ema_debug_logging') and self.config.ema_debug_logging:
-            sma_start = np.mean(prices[:period])
-            final_ema = ema
-            self.logger.debug(f"EMA Calculation: Period={period}, SMA_start={sma_start:.2f}, Final_EMA={final_ema:.2f}, Points={len(prices)}")
-        
-        return ema
+        return TechnicalIndicators.calculate_ema(prices, period)
     
     def calculate_sma(self, prices: List[float], period: int) -> float:
         """Calculate Simple Moving Average."""
-        if len(prices) < period:
-            return np.mean(prices)
-        
-        return np.mean(prices[-period:])
+        return TechnicalIndicators.calculate_sma(prices, period)
     
     def calculate_vwap(self, prices: List[float], volumes: List[float]) -> float:
         """Calculate Volume Weighted Average Price."""
-        if len(prices) != len(volumes) or len(prices) == 0:
-            return 0.0
-        
-        # Validate inputs
-        if any(v <= 0 for v in volumes):
-            # Handle zero/negative volumes by using equal weights
-            return sum(prices) / len(prices)
-        
-        if any(p <= 0 for p in prices):
-            # Log warning for negative prices but continue
-            print(f"Warning: Negative price found in VWAP calculation: {[p for p in prices if p <= 0]}")
-        
-        # Standard VWAP calculation: sum(price * volume) / sum(volume)
-        price_volume = [p * v for p, v in zip(prices, volumes)]
-        total_pv = sum(price_volume)
-        total_volume = sum(volumes)
-        
-        if total_volume == 0:
-            return 0.0
-        
-        vwap = total_pv / total_volume
-        
-        # Validate result
-        if vwap <= 0:
-            print(f"Warning: VWAP calculation resulted in non-positive value: {vwap}")
-            return sum(prices) / len(prices)  # Fallback to simple average
-        
-        return vwap
+        return TechnicalIndicators.calculate_vwap(prices, volumes)
     
     def calculate_bollinger_bands(self, prices: List[float], period: int = 20, 
                                 std_dev: float = 2.0) -> tuple[float, float, float]:
@@ -144,119 +151,17 @@ class BaseStrategy(ABC):
         return upper_band, sma, lower_band
     
     def calculate_rsi(self, prices: List[float], period: int = 14, debug: bool = False) -> float:
-        """Calculate Relative Strength Index using Wilder's exponential smoothing method."""
-        if len(prices) < period + 1:
-            return 50.0
-        
-        # Calculate price changes
-        deltas = [prices[i] - prices[i-1] for i in range(1, len(prices))]
-        gains = [d if d > 0 else 0 for d in deltas]
-        losses = [-d if d < 0 else 0 for d in deltas]
-        
-        if debug:
-            print(f"RSI Debug - Period: {period}, Price points: {len(prices)}")
-            print(f"Last 5 deltas: {deltas[-5:]}")
-            print(f"Last 5 gains: {gains[-5:]}")
-            print(f"Last 5 losses: {losses[-5:]}")
-        
-        # Use Wilder's exponential smoothing (standard RSI method)
-        # First calculation uses simple average for initial values
-        if len(gains) < period:
-            return 50.0
-            
-        # Initial values - simple average of first 'period' values
-        avg_gain = np.mean(gains[:period])
-        avg_loss = np.mean(losses[:period])
-        
-        if debug:
-            print(f"Initial avg_gain: {avg_gain:.6f}")
-            print(f"Initial avg_loss: {avg_loss:.6f}")
-        
-        # Apply Wilder's smoothing for subsequent values
-        # Wilder's smoothing: New_avg = ((Previous_avg * (period-1)) + Current_value) / period
-        for i in range(period, len(gains)):
-            avg_gain = ((avg_gain * (period - 1)) + gains[i]) / period
-            avg_loss = ((avg_loss * (period - 1)) + losses[i]) / period
-            
-            if debug and i >= len(gains) - 3:  # Debug last few calculations
-                print(f"Step {i}: gain={gains[i]:.6f}, avg_gain={avg_gain:.6f}, avg_loss={avg_loss:.6f}")
-        
-        if avg_loss == 0:
-            return 100.0
-        
-        rs = avg_gain / avg_loss
-        rsi = 100 - (100 / (1 + rs))
-        
-        if debug:
-            print(f"Final: avg_gain={avg_gain:.6f}, avg_loss={avg_loss:.6f}, RS={rs:.6f}, RSI={rsi:.2f}")
-        
-        return rsi
+        """Calculate Relative Strength Index."""
+        # Note: Debug parameter is ignored in the centralized service
+        return TechnicalIndicators.calculate_rsi(prices, period)
     
     def calculate_volatility(self, prices: List[float], period: int = 20) -> float:
         """Calculate rolling volatility using standard deviation of returns."""
-        if len(prices) < period + 1:
-            return 0.02  # Default volatility
-        
-        # Calculate log returns
-        returns = []
-        for i in range(1, len(prices)):
-            if prices[i-1] > 0:
-                returns.append(np.log(prices[i] / prices[i-1]))
-        
-        if len(returns) < period:
-            return np.std(returns) if returns else 0.02
-        
-        # Use the last 'period' returns
-        recent_returns = returns[-period:]
-        return np.std(recent_returns) * np.sqrt(1440)  # Annualized (1440 minutes per day)
+        return TechnicalIndicators.calculate_volatility(prices, period, annualize=True)
     
-    def calculate_atr_simple(self, prices: List[float], period: int = 10) -> float:
-        """Calculate ATR approximation using only close prices with improved True Range estimation."""
-        if len(prices) < 2:
-            return prices[0] * 0.01 if prices else 0.01  # 1% default
-        
-        # Improved True Range approximation for close-only data
-        true_ranges = []
-        for i in range(1, len(prices)):
-            # Estimate High/Low from close prices using typical intrabar range
-            close_prev = prices[i-1]
-            close_curr = prices[i]
-            
-            # MNQ-specific True Range approximation
-            price_change = abs(close_curr - close_prev)
-            
-            # Base intrabar range for MNQ (typically 0.05-0.15% of price)
-            base_range = close_curr * 0.0008  # 0.08% baseline
-            
-            # Gap component (inter-bar price change)
-            gap_component = price_change
-            
-            # True Range = max of gap and typical intrabar range
-            # Cap at reasonable levels for MNQ
-            estimated_range = min(max(base_range, gap_component), close_curr * 0.002)  # Cap at 0.2%
-            
-            true_ranges.append(estimated_range)
-        
-        if len(true_ranges) < period:
-            return np.mean(true_ranges) if true_ranges else 0.01
-        
-        # Use exponential smoothing like proper ATR (Wilder's smoothing)
-        if len(true_ranges) >= period:
-            # Start with simple average of first 'period' values
-            atr = np.mean(true_ranges[:period])
-            
-            # Apply Wilder's smoothing to remaining values
-            for tr in true_ranges[period:]:
-                atr = ((atr * (period - 1)) + tr) / period
-            
-            # Optional validation logging for debugging
-            if hasattr(self, 'logger') and hasattr(self, 'config') and hasattr(self.config, 'atr_debug_logging') and self.config.atr_debug_logging:
-                simple_avg = np.mean(true_ranges)
-                self.logger.debug(f"ATR Calculation: Period={period}, Simple_avg={simple_avg:.4f}, Wilder_ATR={atr:.4f}, Points={len(true_ranges)}")
-            
-            return atr
-        else:
-            return np.mean(true_ranges)
+    def calculate_atr_simple(self, prices: List[float], period: int = 14) -> float:
+        """Calculate ATR approximation using only close prices."""
+        return TechnicalIndicators.calculate_atr_from_closes(prices, period)
     
     def calculate_position_size(self, market_data: MarketData, 
                               stop_price: float) -> int:

@@ -1,632 +1,219 @@
 """
-NinjaTrader TCP Bridge
-Handles communication with NinjaScript strategy over TCP sockets.
+NinjaTrader Bridge v2 - Clean Architecture
+Orchestrates communication with NinjaScript using composition pattern.
 """
-import socket
 import threading
-import json
-import struct
-import time
 from typing import Dict, Any, Optional, Callable
-from dataclasses import dataclass
 from datetime import datetime
 import logging
-from queue import Queue, Empty
-import numpy as np
 
+# Import message types
+from src.infra.message_types import MarketData, TradeSignal, TradeCompletion
 
-@dataclass
-class MarketData:
-    """Market data structure for multi-timeframe bars."""
-    price_1m: list[float]
-    price_5m: list[float]
-    price_15m: list[float]
-    price_30m: list[float]
-    price_1h: list[float]
-    volume_1m: list[float]
-    volume_5m: list[float]
-    volume_15m: list[float]
-    volume_30m: list[float]
-    volume_1h: list[float]
-    account_balance: float
-    buying_power: float
-    daily_pnl: float
-    unrealized_pnl: float
-    open_positions: int
-    current_price: float
-    timestamp: int
-    
-    # Volatility fields
-    volatility_1m: float = 0.0
-    volatility_5m: float = 0.0
-    volatility_15m: float = 0.0
-    volatility_30m: float = 0.0
-    volatility_1h: float = 0.0
-    volatility_regime: str = 'medium'  # 'low', 'medium', 'high'
-    volatility_percentile: float = 0.5
-    volatility_breakout: Optional[dict] = None  # Breakout detection results
-    
-    # Tick-level data for immediate execution
-    current_tick_price: float = 0.0  # Most recent tick price
-    tick_timestamp: int = 0  # Timestamp of last tick update
-    tick_volume: float = 0.0  # Volume at current tick
-    
-    @property
-    def data_age_seconds(self) -> float:
-        """Calculate age of market data in seconds."""
-        current_time = int(time.time() * 1000)  # Current time in milliseconds
-        return (current_time - self.timestamp) / 1000.0
-    
-    def get_data_freshness_warning(self) -> str:
-        """Get warning message if data is stale."""
-        age = self.data_age_seconds
-        if age > 300:  # 5 minutes
-            return f"⚠️  STALE DATA: {age:.0f}s old"
-        elif age > 120:  # 2 minutes
-            return f"⚠️  Aging data: {age:.0f}s old"
-        elif age > 60:  # 1 minute
-            return f"Data age: {age:.0f}s"
-        else:
-            return f"Fresh data: {age:.0f}s"
-    
-    @property
-    def volatility(self) -> float:
-        """Calculate volatility from 1m price data (computed on-demand)."""
-        if len(self.price_1m) < 20:
-            return 0.02  # Default volatility
-        
-        # Calculate log returns
-        returns = []
-        for i in range(1, len(self.price_1m)):
-            if self.price_1m[i-1] > 0:
-                returns.append(np.log(self.price_1m[i] / self.price_1m[i-1]))
-        
-        if len(returns) < 2:
-            return 0.02
-        
-        # Use the last 20 returns for rolling volatility
-        recent_returns = returns[-20:]
-        return np.std(recent_returns) * np.sqrt(1440)  # Annualized
-
-
-@dataclass
-class TradeSignal:
-    """Trade signal structure for sending to NinjaScript."""
-    action: int  # 1=buy, 2=sell, 0=close_all
-    position_size: int
-    confidence: float
-    use_stop: bool = False
-    stop_price: float = 0.0
-    use_target: bool = False
-    target_price: float = 0.0
-
-
-@dataclass
-class TradeCompletion:
-    """Trade completion data from NinjaScript."""
-    pnl: float
-    entry_price: float
-    exit_price: float
-    size: int
-    exit_reason: str
-    entry_time: int
-    exit_time: int
-    trade_duration_minutes: float
+# Import the networking components
+from src.infra.network_manager import NetworkManager
+from src.infra.data_parser import DataParser
+from src.infra.message_handler_factory import MessageHandlerFactory
+from logging_config import get_logger
 
 
 class NinjaTradeBridge:
-    """TCP bridge for communication with NinjaScript strategy."""
+    """Clean, focused bridge to NinjaTrader using composition pattern."""
     
     def __init__(self, config=None):
-        from src.config import SystemConfig
+        from config import SystemConfig
         
         if config is None:
             config = SystemConfig.default()
         
-        # Network configuration
-        self.network_config = config.network
-        self.data_port = self.network_config.data_port
-        self.signal_port = self.network_config.signal_port
+        self.config = config
+        self.logger = get_logger(__name__)
+        self.logger.set_context(component='ninja_bridge')
         
-        self.data_socket: Optional[socket.socket] = None
-        self.signal_socket: Optional[socket.socket] = None
-        self.is_running = False
+        # Composition: Use focused components
+        self.network_manager = NetworkManager(
+            config.network.data_port, 
+            config.network.signal_port, 
+            config
+        )
+        self.data_parser = DataParser()
+        
+        # Data storage
         self.historical_data: Dict[str, Any] = {}
         self.latest_market_data: Optional[MarketData] = None
         
-        # Callback functions
-        self.on_historical_data: Optional[Callable] = None
-        self.on_market_data: Optional[Callable] = None
-        self.on_realtime_tick: Optional[Callable] = None  # NEW: Real-time tick callback
-        self.on_trade_completion: Optional[Callable] = None
-        
-        # Threading
-        self.data_thread: Optional[threading.Thread] = None
-        self.signal_thread: Optional[threading.Thread] = None
-        
         # Thread safety
         self._data_lock = threading.RLock()
-        self._signal_lock = threading.RLock()
         
-        # Error recovery from config
-        self.max_reconnect_attempts = self.network_config.max_reconnect_attempts
-        self.reconnect_delay = self.network_config.reconnect_delay
-        self.connection_timeout = self.network_config.connection_timeout
+        # Message handling
+        self.message_handler_factory = MessageHandlerFactory(self.logger, self._data_lock)
         
-        # Signal queue for thread-safe signal sending
-        self.signal_queue = Queue()
+        # Event callbacks
+        self.on_historical_data: Optional[Callable] = None
+        self.on_market_data: Optional[Callable] = None
+        self.on_realtime_tick: Optional[Callable] = None
+        self.on_trade_completion: Optional[Callable] = None
         
-        # Logging
-        logging.basicConfig(level=logging.INFO)
-        self.logger = logging.getLogger(__name__)
+        # Wire up network callback
+        self.network_manager.on_message_received = self._handle_message
     
     def start(self):
-        """Start the TCP bridge listeners."""
-        self.logger.info("Starting NinjaTrader TCP Bridge...")
-        self.is_running = True
-        
-        # Start data listener
-        self.data_thread = threading.Thread(target=self._listen_data, daemon=True)
-        self.data_thread.start()
-        
-        # Start signal listener  
-        self.signal_thread = threading.Thread(target=self._listen_signals, daemon=True)
-        self.signal_thread.start()
-        
-        # Start signal queue processor
-        self.signal_processor_thread = threading.Thread(target=self._process_signal_queue, daemon=True)
-        self.signal_processor_thread.start()
-        
-        self.logger.info(f"Bridge started - Data: {self.data_port}, Signals: {self.signal_port}")
+        """Start the bridge."""
+        self.logger.info("Starting NinjaTrader Bridge v2...", extra={'ports': {'data': self.config.network.data_port, 'signal': self.config.network.signal_port}})
+        try:
+            self.network_manager.start()
+            self.logger.info("NinjaTrader Bridge v2 started successfully")
+        except Exception as e:
+            self.logger.error("Failed to start NinjaTrader Bridge", extra={'error': str(e)})
+            raise
     
     def stop(self):
-        """Stop the TCP bridge."""
-        self.logger.info("Stopping NinjaTrader TCP Bridge...")
-        self.is_running = False
-        
-        if self.data_socket:
-            self.data_socket.close()
-        if self.signal_socket:
-            self.signal_socket.close()
+        """Stop the bridge."""
+        self.logger.info("Stopping NinjaTrader Bridge v2...")
+        self.network_manager.stop()
+        self.logger.info("NinjaTrader Bridge v2 stopped")
     
-    def _listen_signals(self):
-        """Listen for signal connections from NinjaScript."""
-        server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        server_socket.bind(('localhost', self.signal_port))
-        server_socket.listen(1)
-        
-        self.logger.info(f"Listening for signals on port {self.signal_port}")
-        
-        while self.is_running:
-            try:
-                client_socket, addr = server_socket.accept()
-                self.logger.info(f"NinjaScript signal connection from {addr}")
-                self.signal_socket = client_socket
-                
-                # Keep the connection alive
-                while self.is_running and self.signal_socket:
-                    try:
-                        # Just keep the connection open for sending signals
-                        time.sleep(1)
-                    except Exception as e:
-                        self.logger.error(f"Signal connection error: {e}")
-                        break
-                
-                client_socket.close()
-                self.signal_socket = None
-                
-            except Exception as e:
-                if self.is_running:
-                    self.logger.error(f"Signal listener error: {e}")
-                    time.sleep(1)
-        
-        server_socket.close()
-    
-    def _listen_data(self):
-        """Listen for data from NinjaScript with reconnection logic."""
-        reconnect_attempts = 0
-        
-        while self.is_running and reconnect_attempts < self.max_reconnect_attempts:
-            try:
-                server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-                server_socket.settimeout(self.connection_timeout)
-                server_socket.bind(('localhost', self.data_port))
-                server_socket.listen(1)
-                
-                self.logger.info(f"Listening for data on port {self.data_port}")
-                reconnect_attempts = 0  # Reset on successful bind
-                
-                while self.is_running:
-                    try:
-                        client_socket, addr = server_socket.accept()
-                        self.logger.info(f"NinjaScript connected from {addr}")
-                        
-                        with self._data_lock:
-                            self.data_socket = client_socket
-                        
-                        # Handle client connection
-                        self._handle_data_connection(client_socket)
-                        
-                    except socket.timeout:
-                        continue  # Keep listening for connections
-                    except Exception as e:
-                        if self.is_running:
-                            self.logger.error(f"Error accepting data connection: {e}")
-                            time.sleep(1)
-                        break
-                
-                server_socket.close()
-                
-            except Exception as e:
-                if self.is_running:
-                    reconnect_attempts += 1
-                    self.logger.error(f"Data listener error (attempt {reconnect_attempts}): {e}")
-                    if reconnect_attempts < self.max_reconnect_attempts:
-                        self.logger.info(f"Retrying in {self.reconnect_delay} seconds...")
-                        time.sleep(self.reconnect_delay)
-                    else:
-                        self.logger.error("Max reconnection attempts reached for data listener")
-                        break
-    
-    def _handle_data_connection(self, client_socket: socket.socket):
-        """Handle individual data connection."""
-        try:
-            while self.is_running:
-                try:
-                    # Read message length header (4 bytes)
-                    header_data = self._recv_all(client_socket, 4)
-                    if not header_data:
-                        break
-                    
-                    message_length = struct.unpack('<I', header_data)[0]
-                    
-                    # Validate message length
-                    if message_length > 10 * 1024 * 1024:  # 10MB limit
-                        self.logger.error(f"Message too large: {message_length} bytes")
-                        break
-                    
-                    # Read message data
-                    message_data = self._recv_all(client_socket, message_length)
-                    if not message_data:
-                        break
-                    
-                    # Parse JSON message
-                    try:
-                        message = json.loads(message_data.decode('utf-8'))
-                        self._handle_message(message)
-                    except json.JSONDecodeError as e:
-                        self.logger.error(f"Invalid JSON received: {e}")
-                        continue
-                        
-                except socket.timeout:
-                    continue
-                except Exception as e:
-                    self.logger.error(f"Error receiving data: {e}")
-                    break
-                    
-        finally:
-            client_socket.close()
-            with self._data_lock:
-                self.data_socket = None
-            self.logger.info("Data connection closed")
-    
-    def _recv_all(self, sock: socket.socket, length: int) -> bytes:
-        """Receive exactly length bytes from socket."""
-        data = b''
-        while len(data) < length:
-            packet = sock.recv(length - len(data))
-            if not packet:
-                return b''
-            data += packet
-        return data
-    
-    def _handle_message(self, message: Dict[str, Any]):
-        """Handle incoming message from NinjaScript (thread-safe)."""
-        try:
-            msg_type = message.get('type', '')
-            
-            if msg_type == 'historical_data':
-                with self._data_lock:
-                    self.historical_data = message
-                if self.on_historical_data:
-                    try:
-                        self.on_historical_data(message)
-                    except Exception as e:
-                        self.logger.error(f"Error in historical data callback: {e}")
-                self.logger.info("Historical data loaded")
-            
-            elif msg_type == 'live_data':
-                market_data = self._parse_market_data(message)
-                with self._data_lock:
-                    self.latest_market_data = market_data
-                if self.on_market_data:
-                    try:
-                        self.on_market_data(market_data)
-                    except Exception as e:
-                        self.logger.error(f"Error in market data callback: {e}")
-            
-            elif msg_type == 'realtime_tick':
-                # NEW: Handle real-time tick data for immediate decisions
-                tick_data = self._parse_realtime_tick(message)
-                
-                # Skip processing if validation failed
-                if tick_data is None:
-                    self.logger.debug("Realtime tick validation failed - skipping")
-                    return
-                
-                with self._data_lock:
-                    # Update latest market data with tick information
-                    if self.latest_market_data:
-                        self.latest_market_data.current_tick_price = tick_data.get('current_tick_price', 0.0)
-                        self.latest_market_data.tick_timestamp = tick_data.get('tick_timestamp', 0)
-                        self.latest_market_data.tick_volume = tick_data.get('tick_volume', 0.0)
-                
-                # Call real-time tick callback for immediate strategy decisions
-                if self.on_realtime_tick:
-                    try:
-                        self.on_realtime_tick(tick_data)
-                    except Exception as e:
-                        self.logger.error(f"Error in realtime tick callback: {e}")
-                
-                # Tick processed
-            
-            elif msg_type == 'trade_completion':
-                trade_completion = self._parse_trade_completion(message)
-                if self.on_trade_completion:
-                    try:
-                        self.on_trade_completion(trade_completion)
-                    except Exception as e:
-                        self.logger.error(f"Error in trade completion callback: {e}")
-                self.logger.info(f"Trade: PnL ${trade_completion.pnl:.2f}")
-            
-            else:
-                self.logger.warning(f"Unknown message type: {msg_type}")
-                
-        except Exception as e:
-            self.logger.error(f"Error handling message: {e}")
-    
-    def _parse_market_data(self, message: Dict[str, Any]) -> MarketData:
-        """Parse market data message into MarketData object."""
-        # Handle timestamp with proper fallback and logging
-        raw_timestamp = message.get('timestamp')
-        current_time_ms = int(time.time() * 1000)
-        
-        if raw_timestamp is not None:
-            # Handle NinjaTrader timestamp formats
-            try:
-                if isinstance(raw_timestamp, str):
-                    # Handle yyyyMMddHHmmss format (e.g., "20250718143045")
-                    if len(raw_timestamp) == 14 and raw_timestamp.isdigit():
-                        from datetime import datetime
-                        dt = datetime.strptime(raw_timestamp, '%Y%m%d%H%M%S')
-                        timestamp = int(dt.timestamp() * 1000)
-                        # self.logger.debug(f"Parsed NT string timestamp: {raw_timestamp} -> {timestamp}")
-                    else:
-                        # Try other string formats
-                        from datetime import datetime
-                        dt = datetime.fromisoformat(raw_timestamp.replace('Z', '+00:00'))
-                        timestamp = int(dt.timestamp() * 1000)
-                        # self.logger.debug(f"Parsed ISO timestamp: {raw_timestamp} -> {timestamp}")
-                elif isinstance(raw_timestamp, (int, float)):
-                    # Handle numeric timestamps
-                    if raw_timestamp > 20000000000000:  # .NET Ticks (e.g., 638571234567890000)
-                        # Convert .NET ticks to Unix timestamp
-                        # .NET epoch starts Jan 1, 0001; Unix epoch starts Jan 1, 1970
-                        unix_epoch_ticks = 621355968000000000  # Ticks between .NET epoch and Unix epoch
-                        unix_timestamp_seconds = (raw_timestamp - unix_epoch_ticks) / 10000000
-                        timestamp = int(unix_timestamp_seconds * 1000)
-                        # self.logger.debug(f"Converted .NET ticks: {raw_timestamp} -> {timestamp}")
-                    elif raw_timestamp > 1e12:  # Milliseconds
-                        timestamp = int(raw_timestamp)
-                        # self.logger.debug(f"Using milliseconds timestamp: {raw_timestamp}")
-                    elif raw_timestamp > 1e9:  # Seconds
-                        # Check if timestamp is reasonable as Unix seconds
-                        test_timestamp = int(raw_timestamp * 1000)
-                        test_diff = abs(current_time_ms - test_timestamp)
-                        if test_diff > 86400000:  # If >24 hours off, likely wrong format
-                            # Might be NinjaTrader's internal format - just use current time
-                            timestamp = current_time_ms
-                            # Log for debugging but don't spam
-                            if not hasattr(self, '_nt_format_logged'):
-                                self.logger.info(f"NT timestamp format {raw_timestamp} seems to be internal format, using current time")
-                                self._nt_format_logged = True
-                        else:
-                            timestamp = test_timestamp
-                            # self.logger.debug(f"Converted seconds timestamp: {raw_timestamp} -> {timestamp}")
-                    else:
-                        # Fallback for other numeric formats
-                        timestamp = current_time_ms
-                        self.logger.warning(f"Unrecognized numeric timestamp: {raw_timestamp}")
-                else:
-                    timestamp = current_time_ms
-                    self.logger.warning(f"Unknown timestamp type: {type(raw_timestamp)}")
-            except Exception as e:
-                timestamp = current_time_ms
-                self.logger.warning(f"Timestamp parsing error: {e}, using current time")
-        else:
-            timestamp = current_time_ms
-            # Using current time for timestamp
-        
-        # For NinjaTrader, timestamp accuracy isn't critical for trading
-        # Just use current time if timestamps seem way off
-        time_diff = abs(current_time_ms - timestamp)
-        if time_diff > 604800000:  # 7 days (very lenient)
-            # Only log once per hour to avoid spam
-            if not hasattr(self, '_last_timestamp_warning') or (current_time_ms - getattr(self, '_last_timestamp_warning', 0)) > 3600000:
-                from datetime import datetime
-                nt_time = datetime.fromtimestamp(timestamp/1000).strftime('%Y-%m-%d %H:%M:%S') if timestamp > 0 else 'invalid'
-                current_time = datetime.fromtimestamp(current_time_ms/1000).strftime('%Y-%m-%d %H:%M:%S')
-                self.logger.info(f"NT timestamp off by {time_diff/86400000:.1f} days: {nt_time} vs {current_time}, using system time")
-                self._last_timestamp_warning = current_time_ms
-            
-            # Use current time for trading timestamps
-            timestamp = current_time_ms
-        
-        return MarketData(
-            price_1m=message.get('price_1m', []),
-            price_5m=message.get('price_5m', []),
-            price_15m=message.get('price_15m', []),
-            price_30m=message.get('price_30m', []),
-            price_1h=message.get('price_1h', []),
-            volume_1m=message.get('volume_1m', []),
-            volume_5m=message.get('volume_5m', []),
-            volume_15m=message.get('volume_15m', []),
-            volume_30m=message.get('volume_30m', []),
-            volume_1h=message.get('volume_1h', []),
-            account_balance=message.get('account_balance', 0.0),
-            buying_power=message.get('buying_power', 0.0),
-            daily_pnl=message.get('daily_pnl', 0.0),
-            unrealized_pnl=message.get('unrealized_pnl', 0.0),
-            open_positions=message.get('open_positions', 0),
-            current_price=message.get('current_price', 0.0),
-            current_tick_price=message.get('current_tick_price', message.get('current_price', 0.0)),
-            tick_timestamp=message.get('tick_timestamp', timestamp),
-            tick_volume=message.get('tick_volume', 0.0),
-            timestamp=timestamp
-        )
-    
-    def _parse_trade_completion(self, message: Dict[str, Any]) -> TradeCompletion:
-        """Parse trade completion message into TradeCompletion object."""
-        return TradeCompletion(
-            pnl=message.get('pnl', 0.0),
-            entry_price=message.get('entry_price', 0.0),
-            exit_price=message.get('exit_price', 0.0),
-            size=message.get('size', 0),
-            exit_reason=message.get('exit_reason', ''),
-            entry_time=message.get('entry_time', 0),
-            exit_time=message.get('exit_time', 0),
-            trade_duration_minutes=message.get('trade_duration_minutes', 0.0)
-        )
-    
-    def _parse_realtime_tick(self, message: Dict[str, Any]) -> Dict[str, Any]:
-        """Parse real-time tick message for immediate strategy decisions."""
-        # Extract and validate tick data
-        current_price = message.get('current_price', 0.0)
-        tick_price = message.get('current_tick_price', 0.0)
-        tick_timestamp = message.get('tick_timestamp', 0)
-        tick_volume = message.get('tick_volume', 0.0)
-        
-        # PYTHON-SIDE VALIDATION
-        if not self._validate_tick_data(current_price, tick_price, tick_timestamp):
-            self.logger.warning(f"Invalid tick data rejected: price={tick_price}, timestamp={tick_timestamp}")
-            return None
-        
-        return {
-            'current_price': current_price,
-            'current_tick_price': tick_price,
-            'tick_timestamp': tick_timestamp,
-            'tick_volume': tick_volume,
-            'open_positions': message.get('open_positions', 0),
-            'account_balance': message.get('account_balance', 0.0),
-            'daily_pnl': message.get('daily_pnl', 0.0),
-            'unrealized_pnl': message.get('unrealized_pnl', 0.0),
-            'timestamp': message.get('timestamp', int(time.time() * 1000))
+    def send_signal(self, trade_signal: TradeSignal):
+        """Send trading signal to NinjaScript."""
+        signal_data = {
+            "type": "trade_signal",
+            "action": trade_signal.action,
+            "size": trade_signal.position_size,
+            "confidence": trade_signal.confidence,
+            "use_stop": trade_signal.use_stop,
+            "stop_price": trade_signal.stop_price,
+            "use_target": trade_signal.use_target,
+            "target_price": trade_signal.target_price,
+            "entry_price": trade_signal.entry_price,
+            "reason": trade_signal.reason,
+            "order_id": trade_signal.order_id,
+            "timestamp": int(datetime.now().timestamp() * 1000)
         }
-    
-    def _validate_tick_data(self, current_price: float, tick_price: float, timestamp: int) -> bool:
-        """Validate real-time tick data for sanity."""
-        # Basic sanity checks only - trust NinjaTrader's data quality
-        if tick_price <= 0 or current_price <= 0:
-            return False
         
-        # NaN/infinity check
-        if not (isinstance(tick_price, (int, float)) and isinstance(current_price, (int, float))):
-            return False
+        self.logger.info("Sending trade signal", extra={
+            'order_id': trade_signal.order_id, 
+            'action': trade_signal.action, 
+            'size': trade_signal.position_size,
+            'confidence': trade_signal.confidence,
+            'reason': trade_signal.reason
+        })
         
-        # That's it! Trust NinjaTrader's professional data validation
-        return True
-    
-    def send_signal(self, signal: TradeSignal) -> bool:
-        """Send trade signal to NinjaScript (thread-safe)."""
         try:
-            # Add signal to queue for processing by signal thread
-            self.signal_queue.put(signal, timeout=self.network_config.signal_timeout)
-            return True
+            self.network_manager.send_signal(signal_data)
         except Exception as e:
-            self.logger.error(f"Failed to queue signal: {e}")
-            return False
+            self.logger.error("Failed to send trade signal", extra={'error': str(e), 'order_id': trade_signal.order_id})
     
-    def _process_signal_queue(self):
-        """Process queued signals (runs in signal thread)."""
-        while self.is_running:
-            try:
-                # Get signal from queue with timeout
-                signal = self.signal_queue.get(timeout=self.network_config.signal_timeout)
-                
-                # Send the signal
-                success = self._send_signal_direct(signal)
-                
-                if not success:
-                    # Requeue signal for retry (with limit)
-                    if not hasattr(signal, '_retry_count'):
-                        signal._retry_count = 0
-                    
-                    signal._retry_count += 1
-                    if signal._retry_count < 3:
-                        self.logger.warning(f"Retrying signal send (attempt {signal._retry_count})")
-                        self.signal_queue.put(signal)
-                    else:
-                        self.logger.error("Max signal retry attempts reached, dropping signal")
-                
-                self.signal_queue.task_done()
-                
-            except Empty:
-                continue  # Timeout waiting for signal
-            except Exception as e:
-                self.logger.error(f"Error processing signal queue: {e}")
-    
-    def _send_signal_direct(self, signal: TradeSignal) -> bool:
-        """Send signal directly to NinjaScript."""
-        with self._signal_lock:
-            if not self.signal_socket:
-                self.logger.error("Signal socket not connected")
-                return False
-            
-            try:
-                # Create signal message
-                message = {
-                    'action': signal.action,
-                    'position_size': signal.position_size,
-                    'confidence': signal.confidence,
-                    'use_stop': signal.use_stop,
-                    'stop_price': signal.stop_price,
-                    'use_target': signal.use_target,
-                    'target_price': signal.target_price
-                }
-                
-                # Serialize to JSON
-                json_data = json.dumps(message).encode('utf-8')
-                
-                # Send length header + data
-                header = struct.pack('<I', len(json_data))
-                self.signal_socket.send(header + json_data)
-                
-                action_str = "BUY" if signal.action == 1 else "SELL" if signal.action == 2 else "CLOSE_ALL"
-                self.logger.info(f"NT: {action_str} {signal.position_size}x")
-                return True
-                
-            except Exception as e:
-                self.logger.error(f"Failed to send signal: {e}")
-                return False
-    
-    def get_latest_data(self) -> Optional[MarketData]:
-        """Get the most recent market data (thread-safe)."""
+    def get_latest_market_data(self) -> Optional[MarketData]:
+        """Get the latest market data (thread-safe)."""
         with self._data_lock:
             return self.latest_market_data
     
     def get_historical_data(self) -> Dict[str, Any]:
-        """Get historical data received from NinjaScript (thread-safe)."""
+        """Get historical data (thread-safe)."""
         with self._data_lock:
-            return self.historical_data.copy() if self.historical_data else {}
+            return self.historical_data.copy()
     
     def is_connected(self) -> bool:
-        """Check if bridge is connected to NinjaScript (thread-safe)."""
-        with self._data_lock:
-            return self.data_socket is not None
+        """Check if bridge is connected."""
+        status = self.network_manager.get_connection_status()
+        return status['is_running'] and status['data_connected']
     
-    def is_fully_connected(self) -> bool:
-        """Check if both data and signal sockets are connected (thread-safe)."""
-        with self._data_lock, self._signal_lock:
-            return self.data_socket is not None and self.signal_socket is not None
+    def is_data_connected(self) -> bool:
+        """Check if data connection is established."""
+        status = self.network_manager.get_connection_status()
+        return status['data_connected']
+    
+    def get_connection_status(self) -> Dict[str, Any]:
+        """Get detailed connection status."""
+        return self.network_manager.get_connection_status()
+    
+    def register_custom_message_handler(self, message_type: str, 
+                                      handler_func: Callable[[Dict[str, Any], 'NinjaTradeBridge'], None]):
+        """Register a custom message handler."""
+        custom_handler = self.message_handler_factory.create_custom_handler(message_type, handler_func)
+        self.message_handler_factory.register_handler(custom_handler)
+        self.logger.info(f"Registered custom handler for message type: {message_type}")
+    
+    def get_message_handler_stats(self) -> Dict[str, Any]:
+        """Get message handler statistics."""
+        return self.message_handler_factory.get_handler_stats()
+    
+    def _handle_message(self, message: Dict[str, Any]):
+        """Handle incoming message using factory pattern."""
+        message_type = message.get('type', 'unknown')
+        self.logger.debug("Processing incoming message", extra={'message_type': message_type})
+        
+        try:
+            # Handle different message types
+            if message_type == 'historical_data':
+                self._handle_historical_data(message)
+            elif message_type == 'live_data':
+                self._handle_live_data(message)
+            elif message_type == 'realtime_tick':
+                self._handle_realtime_tick(message)
+            elif message_type == 'trade_completion':
+                self._handle_trade_completion(message)
+            else:
+                self.logger.warning(f"Unknown message type: {message_type}")
+                
+            # Also use factory pattern for extensibility
+            self.message_handler_factory.handle_message(message, self)
+            
+        except Exception as e:
+            self.logger.error("Error handling message", extra={'error': str(e), 'message_type': message_type})
+    
+    def _handle_historical_data(self, message: Dict[str, Any]):
+        """Handle historical data from NinjaTrader."""
+        self.logger.info("Received historical data from NinjaTrader")
+        
+        # Parse historical data
+        historical_data = self.data_parser.parse_historical_data(message)
+        
+        with self._data_lock:
+            self.historical_data = historical_data
+        
+        # Notify callback
+        if self.on_historical_data:
+            self.on_historical_data(historical_data)
+    
+    def _handle_live_data(self, message: Dict[str, Any]):
+        """Handle live market data from NinjaTrader."""
+        # Parse market data
+        market_data = self._parse_market_data(message)
+        
+        with self._data_lock:
+            self.latest_market_data = market_data
+        
+        # Notify callback
+        if self.on_market_data:
+            self.on_market_data(market_data)
+    
+    def _handle_realtime_tick(self, message: Dict[str, Any]):
+        """Handle real-time tick data from NinjaTrader."""
+        # Parse tick data
+        tick_data = self._parse_realtime_tick(message)
+        
+        # Notify callback
+        if self.on_realtime_tick:
+            self.on_realtime_tick(tick_data)
+    
+    def _handle_trade_completion(self, message: Dict[str, Any]):
+        """Handle trade completion from NinjaTrader."""
+        # Parse trade completion
+        trade_completion = self._parse_trade_completion(message)
+        
+        # Notify callback
+        if self.on_trade_completion:
+            self.on_trade_completion(trade_completion)
+    
+    def _parse_market_data(self, message: Dict[str, Any]) -> MarketData:
+        """Parse market data message."""
+        return self.data_parser.parse_market_data(message)
+    
+    def _parse_trade_completion(self, message: Dict[str, Any]) -> TradeCompletion:
+        """Parse trade completion message."""
+        return self.data_parser.parse_trade_completion(message)
+    
+    def _parse_realtime_tick(self, message: Dict[str, Any]) -> Dict[str, Any]:
+        """Parse real-time tick data."""
+        return self.data_parser.parse_realtime_tick(message)
