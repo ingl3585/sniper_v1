@@ -42,11 +42,15 @@ class SignalProcessor:
         mean_reversion_signal = self.mean_reversion.generate_signal(market_data)
         if mean_reversion_signal:
             signals['mean_reversion'] = mean_reversion_signal
+            if not is_realtime_tick:
+                self.logger.debug(f"Mean reversion signal: {mean_reversion_signal.action}, conf={mean_reversion_signal.confidence:.3f}")
         
         # Momentum
         momentum_signal = self.momentum.generate_signal(market_data)
         if momentum_signal:
             signals['momentum'] = momentum_signal
+            if not is_realtime_tick:
+                self.logger.debug(f"Momentum signal: {momentum_signal.action}, conf={momentum_signal.confidence:.3f}")
         
         # Volatility Carry Strategy (if available)
         # Vol carry
@@ -54,6 +58,8 @@ class SignalProcessor:
             vol_carry_signal = self.vol_carry.generate_signal(market_data)
             if vol_carry_signal:
                 signals['vol_carry'] = vol_carry_signal
+                if not is_realtime_tick:
+                    self.logger.debug(f"Vol carry signal: {vol_carry_signal.action}, conf={vol_carry_signal.confidence:.3f}")
         
         # Volatility Breakout Strategy (if available)
         # Vol breakout  
@@ -68,6 +74,14 @@ class SignalProcessor:
         if not is_realtime_tick:
             self.logger.debug("Meta allocation completed")
         
+        # Log all available signals for debugging
+        if signals and not is_realtime_tick:
+            signal_summary = []
+            for name, signal in signals.items():
+                action_str = "BUY" if signal.action == 1 else "SELL" if signal.action == 2 else "HOLD"
+                signal_summary.append(f"{name}={action_str}({signal.confidence:.2f})")
+            self.logger.info(f"Available signals: {', '.join(signal_summary)}")
+        
         # Select best signal
         final_signal = self._select_final_signal(signals, allocation, is_realtime_tick)
         
@@ -77,6 +91,8 @@ class SignalProcessor:
                 # Final trade signal generated
                 self.logger.info("=== Signal Processing End ===")
                 return trade_signal
+            else:
+                self.logger.debug("ExecutionEngine returned None - signal blocked or failed validation")
         else:
             # Rate limit "no signal" messages to avoid spam
             current_time = time.time()
@@ -113,7 +129,8 @@ class SignalProcessor:
             # Select signal with highest confidence
             best_signal = max(signals.items(), key=lambda x: x[1].confidence)
             if not is_realtime_tick:
-                self.logger.debug(f"Selected signal: {best_signal[0]} (confidence: {best_signal[1].confidence:.3f})")
+                action_str = "BUY" if best_signal[1].action == 1 else "SELL" if best_signal[1].action == 2 else "HOLD"
+                self.logger.info(f"Selected signal: {best_signal[0]} {action_str} (confidence: {best_signal[1].confidence:.3f})")
             return best_signal[1]
         
         # Use allocation weights

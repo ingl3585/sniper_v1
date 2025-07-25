@@ -59,6 +59,11 @@ class ExecutionEngine:
             # Convert to trade signal
             trade_signal = self._convert_to_trade_signal(signal, market_data)
             
+            # Check if signal conversion was blocked (position tracking filtered duplicate)
+            if trade_signal is None:
+                self.logger.debug("Signal conversion returned None - position tracking blocked duplicate signal")
+                return None
+            
             # Get execution decision (order type, timing, etc.)
             execution_decision = self.get_execution_decision(trade_signal, market_data)
             
@@ -259,9 +264,57 @@ class ExecutionEngine:
             
             self.logger.info(f"Final position size: {position_size} (max allowed: {max_size})")
         
+        # Position-aware signal conversion
+        current_position = market_data.open_positions
+        action = signal.action
+        final_position_size = position_size
+        
+        # Debug position tracking with source info
+        self.logger.info(f"Position tracking debug: current_position={current_position}, "
+                        f"signal_action={signal.action}, timestamp={market_data.timestamp}")
+        
+        # Get max position size from config
+        max_position_size = self.config.risk_management.max_position_size
+        
+        # Adjust action and size based on current position
+        if current_position == 0:
+            # Flat - normal entry signal
+            action = signal.action
+            final_position_size = position_size
+        elif current_position > 0:  # Currently long
+            if signal.action == 1:  # Want to buy more (already long)
+                if current_position + position_size <= max_position_size:
+                    # Allow additional long position up to limit
+                    action = 1
+                    final_position_size = position_size
+                    self.logger.info(f"Position tracking: Adding to long position {current_position} + {position_size} = {current_position + position_size} (max: {max_position_size})")
+                else:
+                    # At or exceeding position limit
+                    self.logger.info(f"Position tracking: At position limit {current_position}/{max_position_size}, ignoring additional BUY signal")
+                    return None
+            elif signal.action == 2:  # Want to sell (reverse to short)
+                action = 2  # SELL
+                final_position_size = position_size + abs(current_position)  # Close long + go short
+                self.logger.info(f"Position tracking: Converting SELL to size {final_position_size} (close {current_position} long + {position_size} short)")
+        elif current_position < 0:  # Currently short
+            if signal.action == 2:  # Want to sell more (already short)
+                if abs(current_position) + position_size <= max_position_size:
+                    # Allow additional short position up to limit
+                    action = 2
+                    final_position_size = position_size
+                    self.logger.info(f"Position tracking: Adding to short position {abs(current_position)} + {position_size} = {abs(current_position) + position_size} (max: {max_position_size})")
+                else:
+                    # At or exceeding position limit
+                    self.logger.info(f"Position tracking: At position limit {abs(current_position)}/{max_position_size}, ignoring additional SELL signal")
+                    return None
+            elif signal.action == 1:  # Want to buy (reverse to long)
+                action = 1  # BUY
+                final_position_size = position_size + abs(current_position)  # Close short + go long
+                self.logger.info(f"Position tracking: Converting BUY to size {final_position_size} (close {abs(current_position)} short + {position_size} long)")
+        
         return TradeSignal(
-            action=signal.action,
-            position_size=position_size,
+            action=action,
+            position_size=final_position_size,
             confidence=signal.confidence,
             use_stop=signal.stop_price is not None,
             stop_price=signal.stop_price or 0.0,

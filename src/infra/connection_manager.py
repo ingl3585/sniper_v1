@@ -139,7 +139,23 @@ class ConnectionManager:
             'volume_5m': [],
             'volume_15m': [],
             'volume_30m': [],
-            'volume_1h': []
+            'volume_1h': [],
+            # Add OHLC data for technical indicators
+            'open_1m': [],
+            'open_5m': [],
+            'open_15m': [],
+            'open_30m': [],
+            'open_1h': [],
+            'high_1m': [],
+            'high_5m': [],
+            'high_15m': [],
+            'high_30m': [],
+            'high_1h': [],
+            'low_1m': [],
+            'low_5m': [],
+            'low_15m': [],
+            'low_30m': [],
+            'low_1h': []
         }
         
         for timeframe in timeframes:
@@ -152,6 +168,10 @@ class ConnectionManager:
                 for bar in bars:
                     accumulated_data[f'price_{timeframe}'].append(bar.get('close', 0))
                     accumulated_data[f'volume_{timeframe}'].append(bar.get('volume', 0))
+                    # Extract full OHLC data for technical indicators
+                    accumulated_data[f'open_{timeframe}'].append(bar.get('open', 0))
+                    accumulated_data[f'high_{timeframe}'].append(bar.get('high', 0))
+                    accumulated_data[f'low_{timeframe}'].append(bar.get('low', 0))
         
         # Create single MarketData object with all accumulated historical data
         if any(len(data) > 0 for data in accumulated_data.values()):

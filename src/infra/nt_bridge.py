@@ -91,9 +91,14 @@ class NinjaTradeBridge:
         }
         
         # Signal prepared for transmission
+        self.logger.info(f"Transmitting signal to NinjaTrader: Action={signal_data['action']}, Size={signal_data['position_size']}, Order={signal_data['order_id']}")
         
         try:
-            self.network_manager.send_signal(signal_data)
+            success = self.network_manager.send_signal(signal_data)
+            if success:
+                self.logger.info(f"Signal successfully transmitted to NinjaTrader: {signal_data['order_id']}")
+            else:
+                self.logger.warning(f"Signal transmission failed (no connection): {signal_data['order_id']}")
         except Exception as e:
             self.logger.error("Failed to send trade signal", extra={'error': str(e), 'order_id': trade_signal.order_id})
     

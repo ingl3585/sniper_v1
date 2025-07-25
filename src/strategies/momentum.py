@@ -23,6 +23,9 @@ class MomentumStrategy(BaseStrategy):
         self.trend_direction = 0  # 1=up, -1=down, 0=neutral
         self.trend_strength = 0.0
         self.trend_duration = 0
+        self.last_trend_update_time = 0  # Track when trend was last updated
+        self.last_momentum_signal_time = 0  # Track when last signal was logged
+        self.signal_cooldown_seconds = 30  # Minimum 30 seconds between signal logs
     
     def generate_signal(self, market_data: MarketData) -> Optional[Signal]:
         """Generate momentum signal based on EMA crossovers and trend strength."""
@@ -39,14 +42,14 @@ class MomentumStrategy(BaseStrategy):
         # Analyze trend on 1h timeframe
         prices_1h = self.price_history_manager.get_prices('1h')
         volumes_1h = self.price_history_manager.get_volumes('1h')
-        signal_1h = self._analyze_trend(prices_1h, volumes_1h, "1h")
+        signal_1h = self._analyze_trend(prices_1h, volumes_1h, "1h", market_data)
         
         # Analyze trend on 30m timeframe for confirmation
         signal_30m = None
         if self.price_history_manager.get_data_length('30m') >= 10:
             prices_30m = self.price_history_manager.get_prices('30m')
             volumes_30m = self.price_history_manager.get_volumes('30m')
-            signal_30m = self._analyze_trend(prices_30m, volumes_30m, "30m")
+            signal_30m = self._analyze_trend(prices_30m, volumes_30m, "30m", market_data)
         
         # Combine signals from both timeframes
         final_signal = self._combine_momentum_signals(signal_1h, signal_30m, market_data)
@@ -74,7 +77,7 @@ class MomentumStrategy(BaseStrategy):
             target_price=signal.target_price or 0.0
         )
     
-    def _analyze_trend(self, prices: list, volumes: list, timeframe: str) -> Optional[Signal]:
+    def _analyze_trend(self, prices: list, volumes: list, timeframe: str, market_data: MarketData = None) -> Optional[Signal]:
         """Analyze trend strength and direction for momentum signals."""
         if len(prices) < 10:  # Just need basic data, no hard requirements 
             return None
@@ -144,24 +147,45 @@ class MomentumStrategy(BaseStrategy):
             volume_confirmation > 0.5 and
             self.trend_duration >= self.config.min_trend_duration):
             
-            stop_price = current_price - (atr * RISK.TRAIL_STOP_ATR_MULTIPLIER)
+            # Rate limit signal generation to prevent duplicate signals
+            import time
+            current_time = time.time()
             
-            # Target is based on trend strength and ATR
-            target_distance = atr * (2 + trend_strength * 3)  # 2-5x ATR based on strength
-            target_price = current_price + target_distance
-            
-            confidence = min(0.95, trend_strength * volume_confirmation)
-            
-            signal = Signal(
-                action=1,  # Buy
-                confidence=confidence,
-                entry_price=current_price,
-                stop_price=stop_price,
-                target_price=target_price,
-                reason=f"Momentum buy {timeframe}: Bullish trend, strength={trend_strength:.2f}, vol_conf={volume_confirmation:.2f}",
-                timestamp=datetime.now()
-            )
-            self.logger.info(f"MOMENTUM {timeframe}: BUY @ ${current_price:.2f} | Trend Strength: {trend_strength:.3f} (>{self.config.trend_strength_threshold}), Duration: {self.trend_duration} bars, Volume: {volume_confirmation:.3f}")
+            # Only create signal if enough time has passed since last signal
+            if current_time - self.last_momentum_signal_time >= self.signal_cooldown_seconds:
+                stop_price = current_price - (atr * RISK.TRAIL_STOP_ATR_MULTIPLIER)
+                
+                # Target is based on trend strength and ATR
+                target_distance = atr * (2 + trend_strength * 3)  # 2-5x ATR based on strength
+                target_price = current_price + target_distance
+                
+                # Enhanced confidence with baseline and trend strength scaling
+                base_confidence = 0.45  # Minimum confidence for valid signals
+                trend_component = trend_strength * 0.8  # Scale trend strength contribution  
+                volume_component = volume_confirmation * 0.15  # Volume confirmation bonus
+                confidence = min(0.95, base_confidence + trend_component + volume_component)
+                
+                signal = Signal(
+                    action=1,  # Buy
+                    confidence=confidence,
+                    entry_price=current_price,
+                    stop_price=stop_price,
+                    target_price=target_price,
+                    reason=f"Momentum buy {timeframe}: Bullish trend, strength={trend_strength:.2f}, vol_conf={volume_confirmation:.2f}",
+                    timestamp=datetime.now()
+                )
+                
+                # Calculate FVDR for logging
+                try:
+                    fvdr_value = self._calculate_fvdr_multiplier(market_data)
+                    fvdr_str = f", FVDR: {fvdr_value:.3f}"
+                except Exception as e:
+                    self.logger.error(f"FVDR calculation failed: {e}")
+                    fvdr_str = ", FVDR: N/A"
+                
+                # Log the signal generation
+                self.logger.info(f"MOMENTUM {timeframe}: BUY @ ${current_price:.2f} | Trend Strength: {trend_strength:.3f} (>{self.config.trend_strength_threshold}), Duration: {self.trend_duration} bars, Volume: {volume_confirmation:.3f}{fvdr_str}")
+                self.last_momentum_signal_time = current_time
         
         # Bearish momentum signal
         elif (bearish_signal and 
@@ -169,25 +193,54 @@ class MomentumStrategy(BaseStrategy):
               volume_confirmation > 0.5 and
               self.trend_duration >= self.config.min_trend_duration):
             
-            stop_price = current_price + (atr * RISK.TRAIL_STOP_ATR_MULTIPLIER)
+            # Rate limit signal generation to prevent duplicate signals
+            import time
+            current_time = time.time()
             
-            # Target is based on trend strength and ATR
-            target_distance = atr * (2 + trend_strength * 3)
-            target_price = current_price - target_distance
-            
-            confidence = min(0.95, trend_strength * volume_confirmation)
-            
-            signal = Signal(
-                action=2,  # Sell
-                confidence=confidence,
-                entry_price=current_price,
-                stop_price=stop_price,
-                target_price=target_price,
-                reason=f"Momentum sell {timeframe}: Bearish trend, strength={trend_strength:.2f}, vol_conf={volume_confirmation:.2f}",
-                timestamp=datetime.now()
-            )
-            self.logger.info(f"MOMENTUM {timeframe}: SELL @ ${current_price:.2f} | Trend Strength: {trend_strength:.3f} (>{self.config.trend_strength_threshold}), Duration: {self.trend_duration} bars, Volume: {volume_confirmation:.3f}")
+            # Only create signal if enough time has passed since last signal
+            if current_time - self.last_momentum_signal_time >= self.signal_cooldown_seconds:
+                stop_price = current_price + (atr * RISK.TRAIL_STOP_ATR_MULTIPLIER)
+                
+                # Target is based on trend strength and ATR
+                target_distance = atr * (2 + trend_strength * 3)
+                target_price = current_price - target_distance
+                
+                # Enhanced confidence with baseline and trend strength scaling
+                base_confidence = 0.45  # Minimum confidence for valid signals
+                trend_component = trend_strength * 0.8  # Scale trend strength contribution  
+                volume_component = volume_confirmation * 0.15  # Volume confirmation bonus
+                confidence = min(0.95, base_confidence + trend_component + volume_component)
+                
+                signal = Signal(
+                    action=2,  # Sell
+                    confidence=confidence,
+                    entry_price=current_price,
+                    stop_price=stop_price,
+                    target_price=target_price,
+                    reason=f"Momentum sell {timeframe}: Bearish trend, strength={trend_strength:.2f}, vol_conf={volume_confirmation:.2f}",
+                    timestamp=datetime.now()
+                )
+                
+                # Calculate FVDR for logging
+                try:
+                    fvdr_value = self._calculate_fvdr_multiplier(market_data)
+                    fvdr_str = f", FVDR: {fvdr_value:.3f}"
+                except Exception as e:
+                    self.logger.error(f"FVDR calculation failed: {e}")
+                    fvdr_str = ", FVDR: N/A"
+                
+                # Log the signal generation
+                self.logger.info(f"MOMENTUM {timeframe}: SELL @ ${current_price:.2f} | Trend Strength: {trend_strength:.3f} (>{self.config.trend_strength_threshold}), Duration: {self.trend_duration} bars, Volume: {volume_confirmation:.3f}{fvdr_str}")
+                self.last_momentum_signal_time = current_time
         else:
+            # Calculate FVDR for logging (always, not just when detailed logging)
+            try:
+                fvdr_value = self._calculate_fvdr_multiplier(market_data)
+                fvdr_str = f", FVDR: {fvdr_value:.3f}"
+            except Exception as e:
+                self.logger.error(f"FVDR calculation failed: {e}")
+                fvdr_str = ", FVDR: N/A"
+            
             # Only log hold decision if we have trend tracking
             if log_details:
                 reasons = []
@@ -195,7 +248,8 @@ class MomentumStrategy(BaseStrategy):
                 if not volume_condition: reasons.append(f"Volume low: {volume_confirmation:.3f} < 0.5")
                 if not duration_condition: reasons.append(f"Duration short: {self.trend_duration} < {self.config.min_trend_duration}")
                 reason_str = ", ".join(reasons) if reasons else "No clear trend"
-                self.logger.info(f"MOMENTUM {timeframe}: HOLD @ ${current_price:.2f} | {reason_str}")
+                
+                self.logger.info(f"MOMENTUM {timeframe}: HOLD @ ${current_price:.2f} | {reason_str}{fvdr_str}")
         
         return signal
     
@@ -262,12 +316,15 @@ class MomentumStrategy(BaseStrategy):
         """Update trend direction and duration tracking."""
         current_direction = 1 if fast_ema > slow_ema else -1
         
-        if current_direction == self.trend_direction:
-            self.trend_duration += 1
-        else:
+        if current_direction != self.trend_direction:
+            # Direction changed - reset trend
             self.trend_direction = current_direction
             self.trend_duration = 1
+        else:
+            # Same direction - increment duration (counts bars, not ticks)
+            self.trend_duration += 1
         
+        # Always update trend strength
         self.trend_strength = trend_strength
     
     
@@ -326,7 +383,7 @@ class MomentumStrategy(BaseStrategy):
             lows_1h = self.price_history_manager.get_lows('1h')
             
             # Need at least 15 bars for FVDR calculation (14 for ATR period + 1)
-            if len(prices_1h) < 15 or len(volumes_1h) < 15:
+            if len(prices_1h) < 15 or len(volumes_1h) < 15 or not highs_1h or not lows_1h or len(highs_1h) < 15 or len(lows_1h) < 15:
                 return 0.0
             
             # Generate synthetic order flow from volume data

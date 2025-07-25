@@ -170,14 +170,19 @@ class TradingSystem:
                 return
             
             # Process market data through signal processor
+            self.logger.debug("Processing market data (regular)")
             trade_signal = self.signal_processor.process_market_data(market_data)
             
             if trade_signal:
+                self.logger.debug(f"Trade signal received for validation: {trade_signal.action}, size={trade_signal.position_size}")
                 # Apply risk management
                 if self.risk_manager.validate_trade_signal(trade_signal, market_data):
+                    self.logger.info(f"Sending trade signal to NinjaTrader: Action={trade_signal.action}, Size={trade_signal.position_size}")
                     self.bridge.send_signal(trade_signal)
                 else:
                     self.logger.info("Trade signal blocked by risk manager")
+            else:
+                self.logger.debug("No trade signal received from signal processor")
             
         except Exception as e:
             self.logger.error(f"Error processing market data: {e}")
@@ -200,16 +205,23 @@ class TradingSystem:
                 return
                 
             # Generate signals with real-time flag
+            self.logger.debug("Processing market data (realtime tick)")
             trade_signal = self.signal_processor.process_market_data(market_data, is_realtime_tick=True)
             
             if trade_signal and self._should_execute_realtime_signal(trade_signal, tick_data):
+                self.logger.debug(f"Realtime trade signal received: {trade_signal.action}, size={trade_signal.position_size}")
                 # Apply expedited risk management for real-time signals
                 if self.risk_manager.validate_realtime_signal(trade_signal, market_data, tick_data):
+                    self.logger.info(f"Sending realtime trade signal to NinjaTrader: Action={trade_signal.action}, Size={trade_signal.position_size}")
                     self.bridge.send_signal(trade_signal)
-                    
-                    # Update tracking
-                    self.last_realtime_signal = trade_signal
-                    self.last_realtime_signal_time = time.time()
+                else:
+                    self.logger.info("Realtime trade signal blocked by risk manager")
+            elif trade_signal:
+                self.logger.debug("Realtime trade signal created but should not execute immediately")
+                
+                # Update tracking
+                self.last_realtime_signal = trade_signal
+                self.last_realtime_signal_time = time.time()
         except Exception as e:
             self.logger.error(f"Error processing real-time tick signals: {e}")
     

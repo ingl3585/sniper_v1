@@ -14,6 +14,7 @@ from sklearn.model_selection import train_test_split
 import lightgbm as lgb
 from logging_config import get_logger
 from src.infra.nt_bridge import MarketData
+from src.infra.message_types import TradeCompletion
 
 
 @dataclass
@@ -713,3 +714,24 @@ class MetaAllocator:
             'lookback_period': self.lookback_period,
             'retrain_interval': self.retrain_interval
         }
+    
+    def update_performance_tracking(self, completion: TradeCompletion) -> None:
+        """Update performance tracking based on trade completion.
+        
+        Args:
+            completion: Trade completion data from NinjaTrader
+        """
+        try:
+            # Log trade completion for ML model performance tracking
+            self.logger.info(f"ML Tracking - Trade completed: {completion.symbol} {completion.quantity} @ ${completion.price:.2f}, "
+                           f"P&L: ${completion.pnl:.2f}, Order: {completion.order_id}")
+            
+            # Future enhancements could include:
+            # - Track strategy-specific performance metrics
+            # - Update ML model features based on trade outcomes
+            # - Adjust allocation weights based on recent performance
+            # - Store trade data for model retraining
+            # - Calculate reward signals for reinforcement learning
+            
+        except Exception as e:
+            self.logger.error(f"Error updating ML performance tracking: {e}")

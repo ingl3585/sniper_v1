@@ -10,6 +10,7 @@ from typing import Optional, Dict, Any
 @dataclass
 class MarketData:
     """Market data structure for multi-timeframe bars."""
+    # Required fields (no defaults)
     price_1m: list[float]
     price_5m: list[float]
     price_15m: list[float]
@@ -27,6 +28,23 @@ class MarketData:
     open_positions: int
     current_price: float
     timestamp: int
+    
+    # Optional OHLC data for technical indicators (with defaults)
+    open_1m: list[float] = None
+    open_5m: list[float] = None
+    open_15m: list[float] = None
+    open_30m: list[float] = None
+    open_1h: list[float] = None
+    high_1m: list[float] = None
+    high_5m: list[float] = None
+    high_15m: list[float] = None
+    high_30m: list[float] = None
+    high_1h: list[float] = None
+    low_1m: list[float] = None
+    low_5m: list[float] = None
+    low_15m: list[float] = None
+    low_30m: list[float] = None
+    low_1h: list[float] = None
     
     # Volatility fields
     volatility_1m: float = 0.0

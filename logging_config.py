@@ -183,7 +183,7 @@ class LoggingConfig:
     """Centralized logging configuration for the trading system."""
     
     def __init__(self, 
-                 log_level: str = "INFO",
+                 log_level: str = "DEBUG",
                  log_dir: str = "logs",
                  max_file_size: int = 50 * 1024 * 1024,  # 50MB
                  backup_count: int = 10,

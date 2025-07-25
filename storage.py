@@ -175,36 +175,56 @@ class PriceHistoryManager:
         with self._lock:
             # Update 1m data
             if hasattr(market_data, 'price_1m') and market_data.price_1m and market_data.volume_1m:
-                self._update_timeframe('1m', market_data.price_1m, market_data.volume_1m)
+                self._update_timeframe('1m', market_data.price_1m, market_data.volume_1m, 
+                                     getattr(market_data, 'high_1m', None), 
+                                     getattr(market_data, 'low_1m', None), 
+                                     getattr(market_data, 'open_1m', None))
                 self.last_update['1m'] = market_data.timestamp
             
             # Update 5m data
             if hasattr(market_data, 'price_5m') and market_data.price_5m and market_data.volume_5m:
-                self._update_timeframe('5m', market_data.price_5m, market_data.volume_5m)
+                self._update_timeframe('5m', market_data.price_5m, market_data.volume_5m,
+                                     getattr(market_data, 'high_5m', None), 
+                                     getattr(market_data, 'low_5m', None), 
+                                     getattr(market_data, 'open_5m', None))
                 self.last_update['5m'] = market_data.timestamp
             
             # Update 15m data
             if hasattr(market_data, 'price_15m') and market_data.price_15m and market_data.volume_15m:
-                self._update_timeframe('15m', market_data.price_15m, market_data.volume_15m)
+                self._update_timeframe('15m', market_data.price_15m, market_data.volume_15m,
+                                     getattr(market_data, 'high_15m', None), 
+                                     getattr(market_data, 'low_15m', None), 
+                                     getattr(market_data, 'open_15m', None))
                 self.last_update['15m'] = market_data.timestamp
             
             # Update 30m data
             if hasattr(market_data, 'price_30m') and market_data.price_30m and market_data.volume_30m:
-                self._update_timeframe('30m', market_data.price_30m, market_data.volume_30m)
+                self._update_timeframe('30m', market_data.price_30m, market_data.volume_30m,
+                                     getattr(market_data, 'high_30m', None), 
+                                     getattr(market_data, 'low_30m', None), 
+                                     getattr(market_data, 'open_30m', None))
                 self.last_update['30m'] = market_data.timestamp
             
             # Update 1h data
             if hasattr(market_data, 'price_1h') and market_data.price_1h and market_data.volume_1h:
-                self._update_timeframe('1h', market_data.price_1h, market_data.volume_1h)
+                self._update_timeframe('1h', market_data.price_1h, market_data.volume_1h,
+                                     getattr(market_data, 'high_1h', None), 
+                                     getattr(market_data, 'low_1h', None), 
+                                     getattr(market_data, 'open_1h', None))
                 self.last_update['1h'] = market_data.timestamp
     
-    def _update_timeframe(self, timeframe: str, price_list: List[float], volume_list: List[float]) -> None:
+    def _update_timeframe(self, timeframe: str, price_list: List[float], volume_list: List[float], 
+                         high_list: Optional[List[float]] = None, low_list: Optional[List[float]] = None, 
+                         open_list: Optional[List[float]] = None) -> None:
         """Update a specific timeframe with new data.
         
         Args:
             timeframe: Timeframe identifier (e.g., '1m', '5m')
-            price_list: List of price values
+            price_list: List of price values (closes)
             volume_list: List of volume values
+            high_list: List of high values (optional)
+            low_list: List of low values (optional)
+            open_list: List of open values (optional)
         """
         if timeframe not in self.timeframes:
             return
@@ -218,13 +238,19 @@ class PriceHistoryManager:
             start_index = len(tf_data.prices)
             for i in range(start_index, len(price_list)):
                 if i < len(volume_list):
-                    tf_data.add_data(price_list[i], volume_list[i])
+                    high_val = high_list[i] if high_list and i < len(high_list) else None
+                    low_val = low_list[i] if low_list and i < len(low_list) else None
+                    open_val = open_list[i] if open_list and i < len(open_list) else None
+                    tf_data.add_data(price_list[i], volume_list[i], high_val, low_val, open_val)
         elif len(price_list) > 0 and len(volume_list) > 0:
             # Update the latest point if it's different
             if (len(tf_data.prices) == 0 or 
                 tf_data.prices[-1] != price_list[-1] or 
                 tf_data.volumes[-1] != volume_list[-1]):
-                tf_data.add_data(price_list[-1], volume_list[-1])
+                high_val = high_list[-1] if high_list and len(high_list) > 0 else None
+                low_val = low_list[-1] if low_list and len(low_list) > 0 else None
+                open_val = open_list[-1] if open_list and len(open_list) > 0 else None
+                tf_data.add_data(price_list[-1], volume_list[-1], high_val, low_val, open_val)
     
     def get_prices(self, timeframe: str, length: Optional[int] = None) -> List[float]:
         """Get price data for a specific timeframe.

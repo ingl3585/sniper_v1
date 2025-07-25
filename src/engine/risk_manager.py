@@ -5,6 +5,7 @@ Handles position limits, daily loss limits, and emergency actions.
 import time
 from logging_config import get_logger
 from src.infra.nt_bridge import MarketData, TradeSignal
+from src.infra.message_types import TradeCompletion
 
 
 class RiskManager:
@@ -122,4 +123,25 @@ class RiskManager:
         except Exception as e:
             self.logger.error(f"Error validating realtime signal: {e}")
             return False
+    
+    def update_trade_completion(self, completion: TradeCompletion) -> None:
+        """Update risk tracking based on trade completion.
+        
+        Args:
+            completion: Trade completion data from NinjaTrader
+        """
+        try:
+            # Log trade completion for risk tracking
+            self.logger.info(f"Trade completed: {completion.symbol} {completion.quantity} @ ${completion.price:.2f}, "
+                           f"P&L: ${completion.pnl:.2f}, Order: {completion.order_id}")
+            
+            # Future enhancements could include:
+            # - Track daily P&L accumulation
+            # - Update position tracking
+            # - Check if close-to-limit warnings needed
+            # - Update trade performance metrics
+            # - Risk-based position sizing adjustments
+            
+        except Exception as e:
+            self.logger.error(f"Error updating trade completion: {e}")
     

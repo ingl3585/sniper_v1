@@ -22,6 +22,8 @@ class MeanReversionStrategy(BaseStrategy):
         self.config: MeanReversionConfig = config
         self.vwap_history = []
         self.last_trade_time = None  # Track last trade time for rate limiting
+        self.last_mean_rev_signal_time = 0  # Track when last signal was logged
+        self.signal_cooldown_seconds = 30  # Minimum 30 seconds between signal logs
     
     def generate_signal(self, market_data: MarketData) -> Optional[Signal]:
         """Generate mean reversion signal based on VWAP deviation."""
@@ -51,14 +53,14 @@ class MeanReversionStrategy(BaseStrategy):
         # Calculate VWAP and deviation for 5m timeframe
         prices_5m = self.price_history_manager.get_prices('5m')
         volumes_5m = self.price_history_manager.get_volumes('5m')
-        signal_5m = self._analyze_timeframe(prices_5m, volumes_5m, "5m", should_log_price)
+        signal_5m = self._analyze_timeframe(prices_5m, volumes_5m, "5m", should_log_price, market_data)
         
         # Calculate VWAP and deviation for 15m timeframe
         signal_15m = None
         if self.price_history_manager.get_data_length('15m') >= 10:
             prices_15m = self.price_history_manager.get_prices('15m')
             volumes_15m = self.price_history_manager.get_volumes('15m')
-            signal_15m = self._analyze_timeframe(prices_15m, volumes_15m, "15m", should_log_price)
+            signal_15m = self._analyze_timeframe(prices_15m, volumes_15m, "15m", should_log_price, market_data)
         
         # Analyze 1m timeframe for confirmation if enabled
         signal_1m = None
@@ -77,7 +79,7 @@ class MeanReversionStrategy(BaseStrategy):
         return final_signal
     
     
-    def _analyze_timeframe(self, prices: list, volumes: list, timeframe: str, should_log_details: bool = False) -> Optional[Signal]:
+    def _analyze_timeframe(self, prices: list, volumes: list, timeframe: str, should_log_details: bool = False, market_data: MarketData = None) -> Optional[Signal]:
         """Analyze a specific timeframe for mean reversion opportunities."""
         # Validate input data
         if not self._validate_timeframe_data(prices, volumes, timeframe):
@@ -119,15 +121,55 @@ class MeanReversionStrategy(BaseStrategy):
         # Generate signal based on conditions
         signal = None
         if oversold:
-            signal = self._create_buy_signal(current_price, vwap, atr, z_score, rsi, timeframe)
-            self.logger.info(f"MEAN_REV {timeframe}: BUY @ ${current_price:.2f} | Z-Score: {z_score:.2f} (<-1.5), RSI: {rsi:.1f} (<35), VWAP: ${vwap:.2f}")
+            # Rate limit signal generation to prevent duplicate signals
+            import time
+            current_time = time.time()
+            
+            # Only create signal if enough time has passed since last signal
+            if current_time - self.last_mean_rev_signal_time >= self.signal_cooldown_seconds:
+                signal = self._create_buy_signal(current_price, vwap, atr, z_score, rsi, timeframe)
+                
+                # Calculate NFVGS for logging
+                try:
+                    nfvgs_value = self._calculate_nfvgs_filter(market_data)
+                    nfvgs_str = f", NFVGS: {nfvgs_value:.3f}"
+                except Exception as e:
+                    self.logger.error(f"NFVGS calculation failed: {e}")
+                    nfvgs_str = ", NFVGS: N/A"
+                
+                self.logger.info(f"MEAN_REV {timeframe}: BUY @ ${current_price:.2f} | Z-Score: {z_score:.2f} (<-1.5), RSI: {rsi:.1f} (<35), VWAP: ${vwap:.2f}{nfvgs_str}")
+                self.last_mean_rev_signal_time = current_time
         elif overbought:
-            signal = self._create_sell_signal(current_price, vwap, atr, z_score, rsi, timeframe)
-            self.logger.info(f"MEAN_REV {timeframe}: SELL @ ${current_price:.2f} | Z-Score: {z_score:.2f} (>1.5), RSI: {rsi:.1f} (>65), VWAP: ${vwap:.2f}")
+            # Rate limit signal generation to prevent duplicate signals
+            import time
+            current_time = time.time()
+            
+            # Only create signal if enough time has passed since last signal
+            if current_time - self.last_mean_rev_signal_time >= self.signal_cooldown_seconds:
+                signal = self._create_sell_signal(current_price, vwap, atr, z_score, rsi, timeframe)
+                
+                # Calculate NFVGS for logging
+                try:
+                    nfvgs_value = self._calculate_nfvgs_filter(market_data)
+                    nfvgs_str = f", NFVGS: {nfvgs_value:.3f}"
+                except Exception as e:
+                    self.logger.error(f"NFVGS calculation failed: {e}")
+                    nfvgs_str = ", NFVGS: N/A"
+                
+                self.logger.info(f"MEAN_REV {timeframe}: SELL @ ${current_price:.2f} | Z-Score: {z_score:.2f} (>1.5), RSI: {rsi:.1f} (>65), VWAP: ${vwap:.2f}{nfvgs_str}")
+                self.last_mean_rev_signal_time = current_time
         else:
+            # Calculate NFVGS for logging (always, not just when detailed logging)
+            try:
+                nfvgs_value = self._calculate_nfvgs_filter(market_data)
+                nfvgs_str = f", NFVGS: {nfvgs_value:.3f}"
+            except Exception as e:
+                self.logger.error(f"NFVGS calculation failed: {e}")
+                nfvgs_str = ", NFVGS: N/A"
+            
             # Log hold decision with key metrics (rate limited)
             if should_log_details or self.should_log_detailed_analysis():
-                self.logger.info(f"MEAN_REV {timeframe}: HOLD @ ${current_price:.2f} | Z-Score: {z_score:.2f} (need >1.5 or <-1.5), RSI: {rsi:.1f} (need <35 or >65)")
+                self.logger.info(f"MEAN_REV {timeframe}: HOLD @ ${current_price:.2f} | Z-Score: {z_score:.2f} (need >1.5 or <-1.5), RSI: {rsi:.1f} (need <35 or >65){nfvgs_str}")
         
         return signal
     
@@ -418,7 +460,7 @@ class MeanReversionStrategy(BaseStrategy):
             closes_15m = self.price_history_manager.get_prices('15m')
             
             # Need at least 18 bars for NFVGS calculation (14 for ATR + 4 for gap detection)
-            if len(closes_15m) < 18 or len(highs_15m) < 18 or len(lows_15m) < 18:
+            if len(closes_15m) < 18 or not highs_15m or not lows_15m or len(highs_15m) < 18 or len(lows_15m) < 18:
                 return 0.0
             
             # Calculate NFVGS using the technical indicators service
