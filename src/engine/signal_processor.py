@@ -32,7 +32,7 @@ class SignalProcessor:
         """Process market data and generate trading signals."""
         # Processing signals (real-time mode suppresses verbose logging)
         if not is_realtime_tick:
-            self.logger.info("Processing signals")
+            self.logger.debug("Processing market data signals")
         
         # Generate signals from all strategies
         signals = {}
@@ -74,9 +74,7 @@ class SignalProcessor:
         if final_signal:
             trade_signal = self.execution_engine.execute_signal(final_signal, market_data)
             if trade_signal:
-                self.logger.info(f"Final Trade Signal: Action={trade_signal.action}, "
-                               f"Size={trade_signal.position_size}, "
-                               f"Confidence={trade_signal.confidence:.3f}")
+                # Final trade signal generated
                 self.logger.info("=== Signal Processing End ===")
                 return trade_signal
         else:
@@ -115,7 +113,7 @@ class SignalProcessor:
             # Select signal with highest confidence
             best_signal = max(signals.items(), key=lambda x: x[1].confidence)
             if not is_realtime_tick:
-                self.logger.info(f"Selected {best_signal[0]} signal with confidence {best_signal[1].confidence:.2f} (equal weights)")
+                self.logger.debug(f"Selected signal: {best_signal[0]} (confidence: {best_signal[1].confidence:.3f})")
             return best_signal[1]
         
         # Use allocation weights
@@ -143,7 +141,7 @@ class SignalProcessor:
         # Select signal with highest weighted score
         best_signal = max(weighted_signals, key=lambda x: x[1].confidence * x[2])
         if not is_realtime_tick:
-            self.logger.info(f"Selected {best_signal[0]} signal with confidence {best_signal[1].confidence:.2f} and weight {best_signal[2]:.2f}")
+            self.logger.debug(f"Selected weighted signal: {best_signal[0]} (score: {best_signal[1].confidence * best_signal[2]:.3f})")
         
         return best_signal[1]
     
@@ -163,7 +161,7 @@ class SignalProcessor:
         """Cleanup signal processor resources."""
         if hasattr(self, 'execution_engine'):
             self.execution_engine.cleanup()
-        self.logger.info("SignalProcessor: Cleanup complete")
+        # Signal processor cleanup complete
     
     def get_execution_metrics(self):
         """Get execution metrics from the execution engine."""

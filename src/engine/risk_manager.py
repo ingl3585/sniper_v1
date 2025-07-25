@@ -22,7 +22,7 @@ class RiskManager:
         if self.connection_manager and not self.connection_manager.is_ready_for_trading():
             # Don't spam log this - only log occasionally
             if not hasattr(self, '_last_historical_warning') or (time.time() - getattr(self, '_last_historical_warning', 0)) > 30:
-                self.logger.info("⏳ Waiting for historical data from NinjaTrader before trading...")
+                # Waiting for historical data
                 self._last_historical_warning = time.time()
             return False
         

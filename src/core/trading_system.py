@@ -150,7 +150,6 @@ class TradingSystem:
                 time.sleep(0.1)
                 
             except Exception as e:
-                self.logger.error(f"Error in trading loop: {e}")
                 time.sleep(1)
     
     def _on_historical_data(self, data):
@@ -176,10 +175,9 @@ class TradingSystem:
             if trade_signal:
                 # Apply risk management
                 if self.risk_manager.validate_trade_signal(trade_signal, market_data):
-                    self.logger.info(f"Sending trade signal: {trade_signal.action}")
                     self.bridge.send_signal(trade_signal)
                 else:
-                    self.logger.info("Trade signal rejected by risk manager")
+                    self.logger.info("Trade signal blocked by risk manager")
             
         except Exception as e:
             self.logger.error(f"Error processing market data: {e}")
@@ -207,7 +205,6 @@ class TradingSystem:
             if trade_signal and self._should_execute_realtime_signal(trade_signal, tick_data):
                 # Apply expedited risk management for real-time signals
                 if self.risk_manager.validate_realtime_signal(trade_signal, market_data, tick_data):
-                    self.logger.info(f"Real-time signal: {trade_signal.action} @ {tick_data.get('current_tick_price', 'N/A')}")
                     self.bridge.send_signal(trade_signal)
                     
                     # Update tracking
@@ -250,7 +247,7 @@ class TradingSystem:
                 'bridge_connected': self.bridge.is_running if hasattr(self.bridge, 'is_running') else 'unknown'
             }
             
-            self.logger.info(f"System Status: {status}")
+            self.logger.debug(f"System status check: {status}")
             
         except Exception as e:
             self.logger.error(f"Error logging system status: {e}")

@@ -95,11 +95,11 @@ class ConnectionManager:
                 volume_15m=[],
                 volume_30m=[],
                 volume_1h=[],
-                account_balance=100000.0,  # Default values - should come from real data
-                buying_power=100000.0,
-                daily_pnl=0.0,
-                unrealized_pnl=0.0,
-                open_positions=0,
+                account_balance=float(tick_data.get('account_balance', 100000.0)),
+                buying_power=float(tick_data.get('buying_power', 100000.0)),
+                daily_pnl=float(tick_data.get('daily_pnl', 0.0)),
+                unrealized_pnl=float(tick_data.get('unrealized_pnl', 0.0)),
+                open_positions=int(tick_data.get('open_positions', 0)),
                 current_price=current_price,
                 timestamp=current_time_ms,
                 current_tick_price=current_price,
@@ -116,14 +116,7 @@ class ConnectionManager:
     def process_historical_data(self, historical_data: Dict[str, Any]):
         """Process historical data received from NinjaTrader."""
         try:
-            self.logger.info(f"Processing historical data from NinjaTrader: {list(historical_data.keys())}")
-            
-            # Debug: Log the structure of received data
-            for key, value in historical_data.items():
-                if isinstance(value, list):
-                    self.logger.info(f"Historical data key '{key}': {len(value)} items")
-                else:
-                    self.logger.info(f"Historical data key '{key}': {type(value)} = {value}")
+            # Processing historical data structure
             
             # Initialize strategies with historical data
             self.initialize_strategies(historical_data)
@@ -153,7 +146,7 @@ class ConnectionManager:
             bars_key = f'bars_{timeframe}'
             if bars_key in historical_data:
                 bars = historical_data[bars_key]
-                self.logger.info(f"Loading {len(bars)} bars for {timeframe}")
+                # Loading bars for timeframe
                 
                 # Accumulate all bars for this timeframe
                 for bar in bars:
@@ -176,7 +169,7 @@ class ConnectionManager:
             
             # Single call to update with all historical data
             self.price_history_manager.update_from_market_data(market_data)
-            self.logger.info("Historical data successfully loaded into PriceHistoryManager")
+            # Historical data loaded
     
     
     def stop_bridge(self):

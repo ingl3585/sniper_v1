@@ -178,34 +178,30 @@ class BaseStrategy(ABC):
         """Calculate position size based on risk management."""
         current_price = market_data.current_price
         
-        # Debug logging for position sizing
-        self.logger.info(f"Position sizing debug: account_balance={market_data.account_balance}, "
-                        f"buying_power={market_data.buying_power}, current_price={current_price}, "
-                        f"stop_price={stop_price}")
+        # Position sizing calculation
         
         # Basic validation
         if current_price <= 0 or stop_price <= 0:
-            self.logger.warning(f"Invalid prices: current={current_price}, stop={stop_price}")
+            pass  # Invalid prices
             return 1
         
         # Calculate risk per share
         risk_per_share = abs(current_price - stop_price)
         if risk_per_share <= 0:
-            self.logger.warning(f"Invalid risk per share: {risk_per_share}")
+            pass  # Invalid risk
             return 1
         
         # For futures like MNQ, use a default account size if balance is 0 or unavailable
         account_balance = market_data.account_balance
         if account_balance <= 0:
             account_balance = 50000.0  # Default $50K account for MNQ
-            self.logger.info(f"Using default account balance: ${account_balance}")
+            pass  # Using default balance
         
         # Calculate position size based on risk (0.25% risk per trade)
         risk_amount = account_balance * self.system_config.risk_management.risk_per_trade
         calculated_size = int(risk_amount / risk_per_share)
         
-        self.logger.info(f"Risk calculation: risk_amount=${risk_amount:.2f}, "
-                        f"risk_per_share=${risk_per_share:.2f}, calculated_size={calculated_size}")
+        # Risk calculation completed
         
         # Apply position limits - for MNQ, max 5 contracts
         max_size = self.system_config.risk_management.max_position_size
@@ -213,7 +209,7 @@ class BaseStrategy(ABC):
         # Don't use buying power calculation for futures - it's misleading
         final_size = max(1, min(calculated_size, max_size))
         
-        self.logger.info(f"Final position size: {final_size} (max allowed: {max_size})")
+        # Position size calculated
         
         return final_size
     

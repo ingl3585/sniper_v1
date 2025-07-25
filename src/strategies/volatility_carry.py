@@ -42,31 +42,24 @@ class VolatilityCarryStrategy(BaseStrategy):
             
             # Check if we have sufficient data
             if not self._has_sufficient_data():
-                # Insufficient data for vol carry analysis
                 return None
             
             # Calculate term structure signals
             primary_signal = self._analyze_term_structure(market_data)
             if not primary_signal:
-                # No vol carry signal
                 return None
             
             # Apply carry filters
             if not self._validate_carry_opportunity(primary_signal, market_data):
-                # Vol carry validation failed
                 return None
             
             # Apply risk management
             if not self.should_trade(market_data):
-                # Vol carry risk blocked
                 return None
             
             # Check confidence threshold
             if primary_signal.confidence < self.system_config.risk_management.min_confidence:
-                # Confidence below minimum
                 return None
-                
-            self.logger.info(f"VolCarry: {['HOLD', 'BUY', 'SELL'][primary_signal.action]} @ {primary_signal.confidence:.2f}")
             
             # Update signal tracking for rate limiting
             self.last_signal_time = datetime.now()
@@ -142,13 +135,6 @@ class VolatilityCarryStrategy(BaseStrategy):
                     atr = atr_closes if atr_closes > 0 else (current_price * 0.0015)
                     atr_method = "Closes"
                 
-                # Enhanced ATR debugging  
-                recent_prices = market_data.price_15m[-5:] if len(market_data.price_15m) >= 5 else market_data.price_15m
-                price_range = max(recent_prices) - min(recent_prices) if recent_prices else 0
-                atr_percent = (atr / current_price * 100) if current_price > 0 else 0
-                
-                self.logger.info(f"ATR: {atr_method}=${atr:.2f} ({atr_percent:.3f}%), Range=${price_range:.2f}, Price=${current_price:.2f}")
-                
                 stop_price = current_price + (atr * self.system_config.risk_management.stop_loss_atr_multiplier)
                 target_price = current_price - (atr * self.config.target_atr_multiplier)
                 
@@ -160,6 +146,7 @@ class VolatilityCarryStrategy(BaseStrategy):
                     target_price=target_price,
                     reason=f"Vol carry: Strong contango (slope={overall_slope:.3f})"
                 )
+                self.logger.info(f"VOLCARRY: SELL @ ${current_price:.2f} | Contango slope {overall_slope:.3f} (>{self.config.contango_threshold}), Vol structure: {short_vol:.3f}(5m) -> {long_vol:.3f}(1h)")
             
             # Strong backwardation - buy volatility (expect vol to increase)
             elif overall_slope < -self.config.backwardation_threshold:
@@ -178,13 +165,6 @@ class VolatilityCarryStrategy(BaseStrategy):
                     atr = atr_closes if atr_closes > 0 else (current_price * 0.0015)
                     atr_method = "Closes"
                 
-                # Enhanced ATR debugging  
-                recent_prices = market_data.price_15m[-5:] if len(market_data.price_15m) >= 5 else market_data.price_15m
-                price_range = max(recent_prices) - min(recent_prices) if recent_prices else 0
-                atr_percent = (atr / current_price * 100) if current_price > 0 else 0
-                
-                self.logger.info(f"ATR: {atr_method}=${atr:.2f} ({atr_percent:.3f}%), Range=${price_range:.2f}, Price=${current_price:.2f}")
-                
                 stop_price = current_price - (atr * self.system_config.risk_management.stop_loss_atr_multiplier)
                 target_price = current_price + (atr * self.config.target_atr_multiplier)
                 
@@ -196,13 +176,18 @@ class VolatilityCarryStrategy(BaseStrategy):
                     target_price=target_price,
                     reason=f"Vol carry: Strong backwardation (slope={overall_slope:.3f})"
                 )
+                self.logger.info(f"VOLCARRY: BUY @ ${current_price:.2f} | Backwardation slope {overall_slope:.3f} (<-{self.config.backwardation_threshold}), Vol structure: {short_vol:.3f}(5m) -> {long_vol:.3f}(1h)")
+            else:
+                # Hold decision - only log at regular intervals or when thresholds are close
+                if self.should_log_detailed_analysis():
+                    self.logger.info(f"VOLCARRY: HOLD @ ${current_price:.2f} | Slope {overall_slope:.3f} not extreme (need >{self.config.contango_threshold} or <-{self.config.backwardation_threshold})")
             
             # Term structure: slope={overall_slope:.3f}, signal={'BUY' if signal and signal.action==1 else 'SELL' if signal and signal.action==2 else 'None'}
             
             return signal
             
         except Exception as e:
-            self.logger.error(f"VolCarry: Error in term structure analysis: {e}")
+            self.logger.error(f"VolCarry: Error generating signal: {e}")
             return None
     
     def _validate_carry_opportunity(self, signal: Signal, market_data: MarketData) -> bool:

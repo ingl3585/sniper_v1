@@ -124,7 +124,7 @@ class NetworkManager:
                 self.data_client = client
                 self.data_connected = True
                 
-                self.logger.info(f"Data client connected from {addr}")
+                # Data client connected
                 
                 # Handle messages from this client
                 self._handle_data_client(client)
@@ -145,7 +145,7 @@ class NetworkManager:
                 self.signal_client = client
                 self.signal_connected = True
                 
-                self.logger.info(f"Signal client connected from {addr}")
+                # Signal client connected
                 
                 # Keep connection alive (signals are sent TO client, not FROM client)
                 while self.is_running and self.signal_connected:
@@ -191,7 +191,7 @@ class NetworkManager:
             client.close()
         except:
             pass
-        self.logger.info("Data client disconnected")
+        # Data client disconnected
     
     def _recv_exact(self, client, length):
         """Receive exactly 'length' bytes from client."""
@@ -206,7 +206,7 @@ class NetworkManager:
     def send_signal(self, signal_data: Dict[str, Any]):
         """Send trading signal to NinjaTrader."""
         if not self.signal_connected or not self.signal_client:
-            self.logger.warning("Cannot send signal - no signal client connected")
+            self.logger.warning("Cannot send signal: no client connected")
             return False
         
         try:
@@ -218,7 +218,7 @@ class NetworkManager:
             header = struct.pack('<I', len(message_data))
             self.signal_client.send(header + message_data)
             
-            self.logger.info(f"Signal sent: {signal_data.get('action', 'unknown')}")
+            # Signal sent
             return True
             
         except Exception as e:

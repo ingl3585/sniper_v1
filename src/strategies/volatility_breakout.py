@@ -35,40 +35,32 @@ class VolatilityBreakoutStrategy(BaseStrategy):
             
             # Check if we have sufficient data
             if not self._has_sufficient_data():
-                self.logger.info("VolBreakout: Insufficient data for analysis")
                 return None
             
             # Check cooldown period
             if self._is_in_cooldown():
-                self.logger.info("VolBreakout: In cooldown period")
                 return None
             
             # Analyze volatility breakout
             primary_signal = self._analyze_volatility_breakout(market_data)
             if not primary_signal:
-                if self.should_log_signal_conditions():
-                    self.logger.info("VolBreakout: No breakout signal generated")
                 return None
             
             # Apply regime filters
             if not self._validate_regime_transition(primary_signal, market_data):
-                self.logger.info("VolBreakout: Regime transition validation failed")
                 return None
             
             # Apply risk management
             if not self.should_trade(market_data):
-                self.logger.info("VolBreakout: Risk management blocked trade")
                 return None
             
             # Check confidence threshold
             if primary_signal.confidence < self.system_config.risk_management.min_confidence:
-                self.logger.info(f"VolBreakout: Signal confidence {primary_signal.confidence:.3f} below minimum {self.system_config.risk_management.min_confidence}")
                 return None
                 
             # Set cooldown period
             self.breakout_cooldown = datetime.now() + timedelta(minutes=self.config.cooldown_minutes)
             
-            self.logger.info(f"VolBreakout: Generated {['HOLD', 'BUY', 'SELL'][primary_signal.action]} signal with confidence {primary_signal.confidence:.3f}")
             return primary_signal
             
         except Exception as e:
@@ -82,18 +74,13 @@ class VolatilityBreakoutStrategy(BaseStrategy):
         # Check if we have any data at all (no hard requirements)
         timeframes_to_check = ['5m', '15m', '1h']
         
-        # Only log detailed status occasionally to avoid spam
-        if self.should_log_detailed_analysis():
-            self.logger.info(f"VolBreakout: Data status - {status}")
+        # Check data status
         
         for timeframe in timeframes_to_check:
             available = status.get(timeframe, {}).get('data_points', 0)
             if available > 10:  # Just need some basic data points
                 return True
         
-        # Only log this occasionally to avoid spam
-        if self.should_log_detailed_analysis():
-            self.logger.info("VolBreakout: No sufficient data available yet")
         return False
     
     def _is_in_cooldown(self) -> bool:
@@ -124,34 +111,24 @@ class VolatilityBreakoutStrategy(BaseStrategy):
             return None
             
         except Exception as e:
-            self.logger.error(f"VolBreakout: Error in breakout analysis: {e}")
+            self.logger.error(f"VolBreakout: Error generating signal: {e}")
             return None
     
     def _get_breakout_info(self, timeframe: str) -> Optional[Dict[str, Any]]:
         """Get volatility breakout information with validation."""
-        if self.should_log_detailed_analysis():
-            self.logger.info(f"VolBreakout: Analyzing {timeframe} timeframe for breakouts")
-        
         breakout_info = self.price_history_manager.calculate_volatility_breakout(
             timeframe, self.config.breakout_z_threshold
         )
         
         if not breakout_info:
-            if self.should_log_detailed_analysis():
-                self.logger.info("VolBreakout: No breakout info returned from price history manager")
             return None
         
-        if self.should_log_detailed_analysis():
-            self.logger.info(f"VolBreakout: Breakout info received: {breakout_info}")
         return breakout_info
     
     def _extract_breakout_data(self, breakout_info: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """Extract and validate breakout data."""
         # Check for significant breakout
         if not breakout_info.get('is_breakout', False):
-            if self.should_log_signal_conditions():
-                self.logger.info(f"VolBreakout: No significant breakout detected")
-                self.logger.info(f"VolBreakout: Current z-score: {breakout_info.get('z_score', 0.0):.3f}, threshold: {self.config.breakout_z_threshold}")
             return None
         
         breakout_data = {
@@ -161,7 +138,6 @@ class VolatilityBreakoutStrategy(BaseStrategy):
             'mean_vol': breakout_info.get('mean_vol', 0.0)
         }
         
-        self._log_breakout_analysis(breakout_data)
         return breakout_data
     
     def _handle_volatility_expansion(self, market_data: MarketData, breakout_data: Dict[str, Any]) -> Optional[Signal]:
@@ -176,17 +152,24 @@ class VolatilityBreakoutStrategy(BaseStrategy):
         
         # Strong upward momentum - buy signal
         if price_momentum > self.config.momentum_threshold:
-            return self._create_expansion_signal(
+            signal = self._create_expansion_signal(
                 current_price, breakout_data, action=1, 
                 reason=f"Vol breakout: Expansion + momentum (strength={breakout_data['strength']:.2f})"
             )
+            self.logger.info(f"VOLBREAKOUT: BUY @ ${current_price:.2f} | Vol expansion (strength {breakout_data['strength']:.2f}) + momentum up ({price_momentum:.3f})")
+            return signal
         
         # Strong downward momentum - sell signal  
         elif price_momentum < -self.config.momentum_threshold:
-            return self._create_expansion_signal(
+            signal = self._create_expansion_signal(
                 current_price, breakout_data, action=2,
                 reason=f"Vol breakout: Expansion + momentum down (strength={breakout_data['strength']:.2f})"
             )
+            self.logger.info(f"VOLBREAKOUT: SELL @ ${current_price:.2f} | Vol expansion (strength {breakout_data['strength']:.2f}) + momentum down ({price_momentum:.3f})")
+            return signal
+        else:
+            if self.should_log_detailed_analysis():
+                self.logger.info(f"VOLBREAKOUT: HOLD @ ${current_price:.2f} | Vol expansion detected but momentum {price_momentum:.3f} below threshold {self.config.momentum_threshold}")
         
         return None
     
@@ -208,17 +191,24 @@ class VolatilityBreakoutStrategy(BaseStrategy):
         
         # Price extended upward - sell signal
         if z_score > self.config.price_extension_threshold:
-            return self._create_contraction_signal(
+            signal = self._create_contraction_signal(
                 current_price, price_mean, recent_prices, breakout_data, 
                 action=2, reason=f"Vol contraction: Mean reversion (z-score={z_score:.2f})"
             )
+            self.logger.info(f"VOLBREAKOUT: SELL @ ${current_price:.2f} | Vol contraction + price extended up (z-score {z_score:.2f} > {self.config.price_extension_threshold})")
+            return signal
         
         # Price extended downward - buy signal
         elif z_score < -self.config.price_extension_threshold:
-            return self._create_contraction_signal(
+            signal = self._create_contraction_signal(
                 current_price, price_mean, recent_prices, breakout_data,
                 action=1, reason=f"Vol contraction: Mean reversion (z-score={z_score:.2f})"
             )
+            self.logger.info(f"VOLBREAKOUT: BUY @ ${current_price:.2f} | Vol contraction + price extended down (z-score {z_score:.2f} < -{self.config.price_extension_threshold})")
+            return signal
+        else:
+            if self.should_log_detailed_analysis():
+                self.logger.info(f"VOLBREAKOUT: HOLD @ ${current_price:.2f} | Vol contraction detected but price z-score {z_score:.2f} not extended (need >{self.config.price_extension_threshold})")
         
         return None
     
@@ -265,13 +255,6 @@ class VolatilityBreakoutStrategy(BaseStrategy):
             reason=reason
         )
     
-    def _log_breakout_analysis(self, breakout_data: Dict[str, Any]):
-        """Log breakout analysis details."""
-        self.logger.info(f"VolBreakout Analysis:")
-        self.logger.info(f"  Breakout direction: {breakout_data['direction']}")
-        self.logger.info(f"  Breakout strength: {breakout_data['strength']:.2f}")
-        self.logger.info(f"  Current vol: {breakout_data['current_vol']:.4f}")
-        self.logger.info(f"  Mean vol: {breakout_data['mean_vol']:.4f}")
     
     def _validate_regime_transition(self, signal: Signal, market_data: MarketData) -> bool:
         """Validate that this represents a genuine regime transition."""

@@ -88,7 +88,7 @@ class RealtimeTickHandler(MessageHandler):
             
             # Skip processing if validation failed
             if tick_data is None:
-                self.logger.debug("Realtime tick validation failed - skipping")
+                # Realtime tick validation failed
                 return
             
             with self.data_lock:

@@ -34,9 +34,6 @@ class MomentumStrategy(BaseStrategy):
         
         # Check if we have any data for analysis (no hard requirements)
         if self.price_history_manager.get_data_length('1h') < 10:
-            if self.should_log_detailed_analysis():
-                current_1h_length = self.price_history_manager.get_data_length('1h')
-                self.logger.info(f"Momentum: Waiting for more 1h data - have {current_1h_length}")
             return None
         
         # Analyze trend on 1h timeframe
@@ -80,8 +77,6 @@ class MomentumStrategy(BaseStrategy):
     def _analyze_trend(self, prices: list, volumes: list, timeframe: str) -> Optional[Signal]:
         """Analyze trend strength and direction for momentum signals."""
         if len(prices) < 10:  # Just need basic data, no hard requirements 
-            if self.should_log_detailed_analysis():
-                self.logger.info(f"{timeframe}: Waiting for more data - have {len(prices)}")
             return None
         
         current_price = prices[-1]
@@ -115,111 +110,31 @@ class MomentumStrategy(BaseStrategy):
         atr_period = min(self.system_config.technical_analysis.atr_period, len(prices))
         atr = self.calculate_atr_simple(prices[-atr_period:])
         
-        # Check if we should log detailed analysis (rate limited to avoid spam)
+        # Analysis completed (no detailed logging needed)
         log_details = self.should_log_detailed_analysis()
         
-        if log_details:
-            self.logger.info(f"=== {timeframe} Momentum Analysis ===")
-            self.logger.info(f"Current Price: ${current_price:.2f}")
-            self.logger.info(f"Data Points: {len(prices)} prices, {len(volumes)} volumes")
+        # EMA calculations completed
         
-        # EMA calculation details
-        fast_period_prices = prices[-self.config.fast_ema_period:]
-        slow_period_prices = prices[-self.config.slow_ema_period:]
-        if log_details:
-            self.logger.info(f"EMA Calculations:")
-            self.logger.info(f"Fast EMA Period: {self.config.fast_ema_period} bars")
-            self.logger.info(f"Fast EMA Price Range: ${min(fast_period_prices):.2f} - ${max(fast_period_prices):.2f}")
-            self.logger.info(f"Calculated Fast EMA: ${fast_ema:.2f}")
-            self.logger.info(f"Slow EMA Period: {self.config.slow_ema_period} bars")
-            self.logger.info(f"Slow EMA Price Range: ${min(slow_period_prices):.2f} - ${max(slow_period_prices):.2f}")
-            self.logger.info(f"Calculated Slow EMA: ${slow_ema:.2f}")
+        # Previous EMA values calculated
         
-        # Previous EMA values for crossover detection
-        if log_details:
-            self.logger.info(f"Previous EMA Values:")
-            self.logger.info(f"Previous Fast EMA: ${prev_fast_ema:.2f}")
-            self.logger.info(f"Previous Slow EMA: ${prev_slow_ema:.2f}")
+        # Trend state calculated
         
-        # Trend state analysis
-        ema_separation = abs(fast_ema - slow_ema)
-        ema_separation_pct = (ema_separation / slow_ema) * 100
-        if log_details:
-            self.logger.info(f"EMA Trend State Analysis:")
-            self.logger.info(f"Current Separation: ${ema_separation:.2f} ({ema_separation_pct:.3f}%)")
-            self.logger.info(f"Bullish Trend State: {bullish_signal} (Fast > Slow)")
-            self.logger.info(f"Bearish Trend State: {bearish_signal} (Fast < Slow)")
+        # Trend strength calculated
         
-        # Trend strength breakdown with ATR-based calculations
-        atr_for_debug = self.calculate_atr_simple(prices[-20:], period=10) if len(prices) >= 20 else prices[-1] * 0.01
-        ema_separation_points = abs(fast_ema - slow_ema)
-        ema_separation_strength = min(1.0, ema_separation_points / (atr_for_debug * 2.0))
+        # Volume confirmation calculated
         
-        momentum_prices = prices[-10:] if len(prices) >= 10 else prices
-        price_momentum_points = abs(prices[-1] - momentum_prices[0]) if len(momentum_prices) > 1 else 0
-        momentum_strength_calc = min(1.0, price_momentum_points / (atr_for_debug * 3.0))
+        # Trend tracking updated
         
-        recent_prices = prices[-10:] if len(prices) >= 10 else prices
-        up_moves = sum(1 for i in range(1, len(recent_prices)) if recent_prices[i] > recent_prices[i-1]) if len(recent_prices) > 1 else 0
-        direction_consistency = up_moves / (len(recent_prices) - 1) if len(recent_prices) > 1 else 0.5
-        price_momentum_direction = prices[-1] - momentum_prices[0] if len(momentum_prices) > 1 else 0
-        if price_momentum_direction < 0:
-            direction_consistency = 1.0 - direction_consistency
-            
-        if log_details:
-            self.logger.info(f"Trend Strength Components (ATR-based):")
-            self.logger.info(f"ATR (10-period): ${atr_for_debug:.2f}")
-            self.logger.info(f"EMA Separation: {ema_separation_points:.2f} points / {atr_for_debug * 2.0:.2f} (2x ATR) = {ema_separation_strength:.6f} (weight: 0.4)")
-            self.logger.info(f"Price Momentum: {price_momentum_points:.2f} points / {atr_for_debug * 3.0:.2f} (3x ATR) = {momentum_strength_calc:.6f} (weight: 0.4)")
-            self.logger.info(f"Direction Consistency: {direction_consistency:.6f} (weight: 0.2)")
-            self.logger.info(f"Final Trend Strength: {trend_strength:.6f}")
+        # ATR calculated
         
-        # Volume confirmation breakdown
-        recent_volumes = volumes[-self.config.volume_confirmation_period:] if len(volumes) >= self.config.volume_confirmation_period else volumes
-        avg_volume = np.mean(volumes[-20:] if len(volumes) >= 20 else volumes)
-        current_volume = volumes[-1]
-        volume_ratio = current_volume / avg_volume if avg_volume > 0 else 1.0
-        if log_details:
-            self.logger.info(f"Volume Confirmation:")
-            self.logger.info(f"Volume Period: {self.config.volume_confirmation_period} bars")
-            self.logger.info(f"Current Volume: {current_volume:.0f}")
-            self.logger.info(f"Average Volume (20-bar): {avg_volume:.0f}")
-            self.logger.info(f"Volume Ratio: {volume_ratio:.3f}")
-            self.logger.info(f"Volume Confirmation Score: {volume_confirmation:.6f}")
-        
-        # Trend tracking
-        if log_details:
-            self.logger.info(f"Trend Tracking:")
-            self.logger.info(f"Current Direction: {self.trend_direction} (1=up, -1=down, 0=neutral)")
-            self.logger.info(f"Trend Duration: {self.trend_duration} bars")
-        
-        # ATR details
-        atr_prices = prices[-atr_period:]
-        if log_details:
-            self.logger.info(f"ATR Calculation:")
-            self.logger.info(f"ATR Period: {atr_period} bars")
-            self.logger.info(f"ATR Price Range: ${min(atr_prices):.2f} - ${max(atr_prices):.2f}")
-            self.logger.info(f"Calculated ATR: ${atr:.2f}")
-        
-        # Threshold checks
-        if log_details:
-            self.logger.info(f"Threshold Analysis:")
-            self.logger.info(f"Trend Strength: {trend_strength:.6f} vs {self.config.trend_strength_threshold}")
-            self.logger.info(f"Volume Confirmation: {volume_confirmation:.6f} vs 0.5")
-            self.logger.info(f"Trend Duration: {self.trend_duration} vs {self.config.min_trend_duration}")
+        # Thresholds calculated
         
         # Signal conditions
         trend_condition = trend_strength > self.config.trend_strength_threshold
         volume_condition = volume_confirmation > 0.5
         duration_condition = self.trend_duration >= self.config.min_trend_duration
         
-        if log_details:
-            self.logger.info(f"Signal Conditions:")
-            self.logger.info(f"Trend Strong Enough: {trend_condition}")
-            self.logger.info(f"Volume Confirmed: {volume_condition}")
-            self.logger.info(f"Duration Sufficient: {duration_condition}")
-            self.logger.info(f"Bullish Signal: {bullish_signal and trend_condition and volume_condition and duration_condition}")
-            self.logger.info(f"Bearish Signal: {bearish_signal and trend_condition and volume_condition and duration_condition}")
+        # Signal conditions evaluated
         
         signal = None
         
@@ -246,6 +161,7 @@ class MomentumStrategy(BaseStrategy):
                 reason=f"Momentum buy {timeframe}: Bullish trend, strength={trend_strength:.2f}, vol_conf={volume_confirmation:.2f}",
                 timestamp=datetime.now()
             )
+            self.logger.info(f"MOMENTUM {timeframe}: BUY @ ${current_price:.2f} | Trend Strength: {trend_strength:.3f} (>{self.config.trend_strength_threshold}), Duration: {self.trend_duration} bars, Volume: {volume_confirmation:.3f}")
         
         # Bearish momentum signal
         elif (bearish_signal and 
@@ -270,6 +186,16 @@ class MomentumStrategy(BaseStrategy):
                 reason=f"Momentum sell {timeframe}: Bearish trend, strength={trend_strength:.2f}, vol_conf={volume_confirmation:.2f}",
                 timestamp=datetime.now()
             )
+            self.logger.info(f"MOMENTUM {timeframe}: SELL @ ${current_price:.2f} | Trend Strength: {trend_strength:.3f} (>{self.config.trend_strength_threshold}), Duration: {self.trend_duration} bars, Volume: {volume_confirmation:.3f}")
+        else:
+            # Only log hold decision if we have trend tracking
+            if log_details:
+                reasons = []
+                if not trend_condition: reasons.append(f"Trend weak: {trend_strength:.3f} < {self.config.trend_strength_threshold}")
+                if not volume_condition: reasons.append(f"Volume low: {volume_confirmation:.3f} < 0.5")
+                if not duration_condition: reasons.append(f"Duration short: {self.trend_duration} < {self.config.min_trend_duration}")
+                reason_str = ", ".join(reasons) if reasons else "No clear trend"
+                self.logger.info(f"MOMENTUM {timeframe}: HOLD @ ${current_price:.2f} | {reason_str}")
         
         return signal
     
@@ -363,7 +289,7 @@ class MomentumStrategy(BaseStrategy):
         
         # FVDR filter: only proceed if FVDR > 0 (positive flow momentum)
         if fvdr_multiplier <= 0:
-            self.logger.info(f"Momentum signal filtered out by FVDR: {fvdr_multiplier:.4f} <= 0")
+            self.logger.info(f"MOMENTUM: Signal filtered out by FVDR - value {fvdr_multiplier:.4f} <= 0")
             return None
         
         # Boost confidence if both timeframes agree
@@ -401,7 +327,6 @@ class MomentumStrategy(BaseStrategy):
             
             # Need at least 15 bars for FVDR calculation (14 for ATR period + 1)
             if len(prices_1h) < 15 or len(volumes_1h) < 15:
-                self.logger.debug(f"Insufficient data for FVDR: {len(prices_1h)} prices, {len(volumes_1h)} volumes")
                 return 0.0
             
             # Generate synthetic order flow from volume data
@@ -455,8 +380,6 @@ class MomentumStrategy(BaseStrategy):
             # Only use positive FVDR for momentum (as per CLAUDE.md spec)
             if current_fvdr <= 0:
                 fvdr_multiplier = 0.0
-            
-            self.logger.info(f"FVDR calculation: current={current_fvdr:.4f}, multiplier={fvdr_multiplier:.4f}")
             
             return fvdr_multiplier
             

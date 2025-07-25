@@ -78,7 +78,7 @@ class NinjaTradeBridge:
         signal_data = {
             "type": "trade_signal",
             "action": trade_signal.action,
-            "size": trade_signal.position_size,
+            "position_size": trade_signal.position_size,  # Fixed: was "size", now "position_size"
             "confidence": trade_signal.confidence,
             "use_stop": trade_signal.use_stop,
             "stop_price": trade_signal.stop_price,
@@ -90,13 +90,7 @@ class NinjaTradeBridge:
             "timestamp": int(datetime.now().timestamp() * 1000)
         }
         
-        self.logger.info("Sending trade signal", extra={
-            'order_id': trade_signal.order_id, 
-            'action': trade_signal.action, 
-            'size': trade_signal.position_size,
-            'confidence': trade_signal.confidence,
-            'reason': trade_signal.reason
-        })
+        # Signal prepared for transmission
         
         try:
             self.network_manager.send_signal(signal_data)
@@ -132,7 +126,7 @@ class NinjaTradeBridge:
         """Register a custom message handler."""
         custom_handler = self.message_handler_factory.create_custom_handler(message_type, handler_func)
         self.message_handler_factory.register_handler(custom_handler)
-        self.logger.info(f"Registered custom handler for message type: {message_type}")
+        # Custom handler registered
     
     def get_message_handler_stats(self) -> Dict[str, Any]:
         """Get message handler statistics."""
@@ -141,22 +135,10 @@ class NinjaTradeBridge:
     def _handle_message(self, message: Dict[str, Any]):
         """Handle incoming message using factory pattern."""
         message_type = message.get('type', 'unknown')
-        self.logger.debug("Processing incoming message", extra={'message_type': message_type})
+        # Processing message
         
         try:
-            # Handle different message types
-            if message_type == 'historical_data':
-                self._handle_historical_data(message)
-            elif message_type == 'live_data':
-                self._handle_live_data(message)
-            elif message_type == 'realtime_tick':
-                self._handle_realtime_tick(message)
-            elif message_type == 'trade_completion':
-                self._handle_trade_completion(message)
-            else:
-                self.logger.warning(f"Unknown message type: {message_type}")
-                
-            # Also use factory pattern for extensibility
+            # Use factory pattern for message handling (replaces direct handling)
             self.message_handler_factory.handle_message(message, self)
             
         except Exception as e:

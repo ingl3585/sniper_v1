@@ -51,7 +51,7 @@ class StrategyFactory:
             return None
         
         if strategy_name in self._created_strategies:
-            self.logger.info(f"Returning existing instance of {strategy_name}")
+            # Returning existing instance
             return self._created_strategies[strategy_name]
         
         try:
@@ -92,7 +92,7 @@ class StrategyFactory:
             else:
                 self.logger.warning(f"Failed to create strategy: {strategy_name}")
         
-        self.logger.info(f"Created {len(strategies)} strategies: {list(strategies.keys())}")
+        # Strategies created
         return strategies
     
     def create_enabled_strategies(self) -> Dict[str, BaseStrategy]:
@@ -119,9 +119,10 @@ class StrategyFactory:
                 else:
                     self.logger.warning(f"Failed to create enabled strategy: {strategy_name}")
             else:
-                self.logger.info(f"Strategy disabled in config: {strategy_name}")
+                # Strategy disabled in config
+                pass
         
-        self.logger.info(f"Initialized {len(enabled_strategies)} strategies")
+        # Strategies initialized
         return enabled_strategies
     
     def get_strategy_list(self) -> List[BaseStrategy]:
@@ -190,7 +191,7 @@ class StrategyFactory:
             try:
                 if hasattr(strategy, 'cleanup'):
                     strategy.cleanup()
-                self.logger.info(f"Cleaned up strategy: {strategy_name}")
+                # Strategy cleaned up
             except Exception as e:
                 self.logger.error(f"Error cleaning up strategy {strategy_name}: {e}")
         
